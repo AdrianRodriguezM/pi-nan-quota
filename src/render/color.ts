@@ -47,6 +47,19 @@ export function paintBrand(text: string, mode: ColorMode): string {
   return `\u001b[38;5;${BRAND_ANSI256}m${text}${RESET_FG}`;
 }
 
+/** Every glyph the bars are drawn with, in either family. */
+const BAR_GLYPHS = /[\u25b0\u25b1\u25aa\u25ab]+/g;
+
+/**
+ * Paint the bars inside a block of plain text (the `/nan-quota` table) in the
+ * brand violet. The stored entry stays plain; colour is applied when drawn, so
+ * it follows the terminal of whoever reopens the session.
+ */
+export function paintBars(text: string, mode: ColorMode): string {
+  if (mode === "none") return text;
+  return text.replace(BAR_GLYPHS, (bar) => paintBrand(bar, mode));
+}
+
 /** The slice of pi's `Theme` the renderer depends on. */
 export interface ThemeLike {
   fg(color: ThemeColorName, text: string): string;

@@ -25,7 +25,7 @@ import { MIN_PI_VERSION, snapshotFromQuota, snapshotFromUsage } from "../src/ind
 import { canonicalModelId, filterServed, isNanBaseUrl, isNanModel, isNotServed, pickNanProvider, sameModel } from "../src/models.ts";
 import { parseModelsPayload } from "../src/api/models.ts";
 import { BAR_WIDTH, glyphsFor, renderBar } from "../src/render/bar.ts";
-import { detectColorMode, paintBrand } from "../src/render/color.ts";
+import { detectColorMode, paintBars, paintBrand } from "../src/render/color.ts";
 import { MAX_SEGMENT_WIDTH, renderStatus } from "../src/render/status.ts";
 import { FetchError } from "../src/types.ts";
 
@@ -422,6 +422,11 @@ check("no ANSI when the mode is none", !stripAnsi(deepSeek ?? "").includes("\x1b
 check("brand is plain text in none mode", paintBrand("██", "none") === "██");
 check("brand truecolor escape", paintBrand("██", "truecolor") === "\x1b[38;2;125;57;235m██\x1b[39m");
 check("brand 256 escape", paintBrand("██", "ansi256") === "\x1b[38;5;99m██\x1b[39m");
+const tableLine = "  deepseek-v4-flash  \u25b0\u25b0\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1  20%   614.6M / 3.0B";
+check("table bars are painted violet", paintBars(tableLine, "truecolor") === tableLine.replace("\u25b0\u25b0\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1", "\x1b[38;2;125;57;235m\u25b0\u25b0\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1\x1b[39m"));
+check("the rest of the table line is untouched", stripAnsi(paintBars(tableLine, "truecolor")) === tableLine);
+check("table bars stay plain with NO_COLOR", paintBars(tableLine, "none") === tableLine);
+check("the safe family is painted too", paintBars("\u25aa\u25ab", "ansi256") === "\x1b[38;5;99m\u25aa\u25ab\x1b[39m");
 
 const hot = snapshot([
   model({ model: "deepseek-v4-flash", cap: 3e9, tokensUsed: 1.86e9, remaining: 1.14e9, periodEnd: "2026-12-01T00:00:00Z" }),

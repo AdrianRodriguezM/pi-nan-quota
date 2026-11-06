@@ -33,7 +33,7 @@ import { Debouncer, MODEL_SELECT_MAX_AGE_MS, QuotaCache, TURN_DEBOUNCE_MS } from
 import { describeFailure, HELP_TEXT, renderQuotaReport } from "./command.ts";
 import { loadConfig, type NanQuotaConfig } from "./config.ts";
 import { canonicalModelId, filterServed, isNanModel, pickNanProvider, type ModelLike } from "./models.ts";
-import { detectColorMode } from "./render/color.ts";
+import { detectColorMode, paintBars } from "./render/color.ts";
 import { renderStatus, STATUS_KEY, type StatusRenderOptions } from "./render/status.ts";
 import { FetchError, toFetchError, type ModelQuota, type Snapshot, type UsageReport } from "./types.ts";
 
@@ -250,7 +250,10 @@ export default function piNanQuota(pi: ExtensionAPI): void {
     debouncer.cancel();
   });
 
-  pi.registerEntryRenderer<{ text: string }>(ENTRY_TYPE, (entry) => new Text(entry.data?.text ?? "", 0, 0));
+  pi.registerEntryRenderer<{ text: string }>(
+    ENTRY_TYPE,
+    (entry) => new Text(paintBars(entry.data?.text ?? "", detectColorMode()), 0, 0),
+  );
 
   pi.registerCommand("nan-quota", {
     description: "Show NaN Builders quota per model (refresh | help)",

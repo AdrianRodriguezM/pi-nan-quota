@@ -4,10 +4,11 @@ Your [NaN Builders](https://nan.builders) quota in the [pi](https://pi.dev) foot
 a bar for the model you are using, in NaN's violet, and a `/nan-quota` command
 with the per-model breakdown.
 
-```
-nan ▰▰▱▱▱▱▱▱  20% 24d3h
-nan ▰▰▰▰▰▰▱▱  71% 24d3h · glm5.3-flash 88%
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/AdrianRodriguezM/pi-nan-quota/main/docs/preview.png"
+       alt="The /nan-quota table with violet usage bars per model, and the footer segment: nan, an eight-pill bar, 20%, 24d3h"
+       width="713">
+</p>
 
 Read-only. It does not register a provider, does not write any configuration,
 does not touch `auth.json`, and sends nothing anywhere while you are using a

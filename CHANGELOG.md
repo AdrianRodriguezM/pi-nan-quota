@@ -17,7 +17,8 @@ First release.
   over `warnAt`.
 - `/nan-quota` command with the per-model table, extra pools, the rolling window
   of the premium model, uncapped usage, and month and all-time totals. Output is
-  a custom entry and never enters the model's context.
+  a custom entry and never enters the model's context; its bars are painted in
+  the same violet when drawn.
 - Plan awareness without a hard-coded plan list: quota rows are intersected with
   the documented `GET /v1/models`, which NaN filters by plan. Premium models on a
   member key read `not in your plan`; retired models are hidden; new models work
