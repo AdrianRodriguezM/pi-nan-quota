@@ -1,0 +1,23 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# local npm cache used when the home directory is read-only
+npm-cache/
+
+# secrets / env
+.env
+.env.*
+*.token
+*.key
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# npm pack output
+*.tgz

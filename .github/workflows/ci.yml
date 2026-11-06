@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the floor declared in engines; 24 catches deprecations early.
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run check
+
+      # Every suite is fixture-driven and must not reach the network, so a
+      # failure here is a real regression rather than an upstream outage.
+      - name: Test
+        run: npm test
+
+  # Loads the package through a real pi (resource loader + agent session) at
+  # the oldest version the peer range admits and at the latest one. This is
+  # what catches an extension API that pi renamed or removed.
+  pi-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pi: ["1.3.0", "latest"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install pi ${{ matrix.pi }}
+        run: npm install --no-save @earendil-works/pi-coding-agent@${{ matrix.pi }} @earendil-works/pi-tui@${{ matrix.pi }}
+
+      - name: Typecheck against pi ${{ matrix.pi }}
+        run: npm run check
+
+      - name: Smoke test against pi ${{ matrix.pi }}
+        run: npm run test:smoke
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # Catches the packaging mistakes that only surface on install: a pi
+      # manifest pointing at a file `files` excludes, or a missing LICENSE.
+      - name: Verify the published tarball
+        run: |
+          npm pack --silent
+          tar -tzf pi-nan-quota-*.tgz | sed 's|^package/||' | sort > shipped.txt
+          echo "--- shipped ---" && cat shipped.txt
+          for required in index.ts LICENSE README.md CHANGELOG.md package.json src/index.ts src/render/bar.ts src/api/models.ts; do
+            grep -qx "$required" shipped.txt || { echo "::error::$required missing from tarball"; exit 1; }
+          done
+          node -e "
+            const fs = require('fs');
+            const shipped = new Set(fs.readFileSync('shipped.txt', 'utf8').split('\n'));
+            for (const entry of require('./package.json').pi.extensions) {
+              const rel = entry.replace(/^\.\//, '');
+              if (!shipped.has(rel)) throw new Error('pi manifest points at ' + rel + ', which is not in the tarball');
+            }
+            console.log('pi manifest entries are all shipped');
+          "
+
+  # Publishes to npm on a version tag, and only then. There is no NPM_TOKEN:
+  # npm's trusted publishing mints a short-lived credential from the OIDC token
+  # GitHub issues for this workflow, which is why `id-token: write` is required
+  # and why the job is pinned to this file — npm checks the workflow filename.
+  #
+  # One-time setup on npmjs.com, under the package's Settings -> Trusted
+  # publisher: GitHub Actions, repository AdrianRodriguezM/pi-nan-quota,
+  # workflow `ci.yml`. Until that exists the job fails with an auth error.
+  #
+  # Release: bump "version" in package.json, commit, then
+  #   git tag v0.1.0 && git push origin main --tags
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, pi-compat, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      # setup-node ships npm 10.x; trusted publishing landed in 11.5.1.
+      - name: Use an npm that can publish without a token
+        run: npm install -g npm@latest
+
+      - run: npm ci
+
+      # A tag that disagrees with package.json publishes a version nobody asked
+      # for, under a git ref that does not describe it. Cheaper to catch here.
+      - name: Tag must match package.json
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(node -p "require('./package.json').version")"
+          echo "tag=$tagged package.json=$declared"
+          [ "$tagged" = "$declared" ] || { echo "::error::tag $GITHUB_REF_NAME does not match package.json $declared"; exit 1; }
+
+      # The first release had to be published by hand (npm only lets you add a
+      # trusted publisher to a package that exists), so re-running on a tag whose
+      # version is already on npm is a no-op rather than a red build.
+      - name: Skip if this version is already published
+        id: published
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "pi-nan-quota@${version}" version >/dev/null 2>&1; then
+            echo "pi-nan-quota@${version} is already on npm; nothing to publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --provenance is implied by trusted publishing, but stating it means a
+      # misconfiguration fails loudly instead of silently shipping unsigned.
+      - name: Publish
+        if: steps.published.outputs.skip != 'true'
+        run: npm publish --provenance --access public
