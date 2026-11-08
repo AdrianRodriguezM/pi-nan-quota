@@ -24,7 +24,7 @@ import { formatAge, formatPercent, formatReset, formatResetLong, formatTokens } 
 import { MIN_PI_VERSION, snapshotFromQuota, snapshotFromUsage } from "../src/index.ts";
 import { canonicalModelId, filterServed, isNanBaseUrl, isNanModel, isNotServed, pickNanProvider, sameModel } from "../src/models.ts";
 import { parseModelsPayload } from "../src/api/models.ts";
-import { BAR_WIDTH, glyphsFor, renderBar } from "../src/render/bar.ts";
+import { BAR_WIDTH, glyphsFor, pillsFor, renderBar } from "../src/render/bar.ts";
 import { detectColorMode, paintBars, paintBrand } from "../src/render/color.ts";
 import { MAX_SEGMENT_WIDTH, renderStatus } from "../src/render/status.ts";
 import { FetchError } from "../src/types.ts";
@@ -339,44 +339,69 @@ check("age in minutes", formatAge(5 * 60_000) === "5m");
 check("age in hours", formatAge(125 * 60_000) === "2h");
 
 // ---------------------------------------------------------------------------
-section("bar: eight cells, eighth resolution");
+section("bar: ten pills, a uniform scale");
 
-const ratios = [0, 0.02, 0.21, 0.24, 0.26, 0.5, 0.93, 0.99, 1, 1.5, Number.NaN];
 const F = "\u25b0";
 const E = "\u25b1";
-for (const ratio of ratios) {
-  const bar = renderBar(ratio);
-  check(`ratio ${ratio}: always ${BAR_WIDTH} columns`, visibleWidth(bar) === BAR_WIDTH, `got ${visibleWidth(bar)} ${JSON.stringify(bar)}`);
-  check(`ratio ${ratio}: no blank cell anywhere`, !bar.includes(" "), JSON.stringify(bar));
-  check(`ratio ${ratio}: used cells come first, then the rest`, /^\u25b0*\u25b1*$/.test(bar), JSON.stringify(bar));
-}
-check("0% is all hollow", renderBar(0) === E.repeat(8), JSON.stringify(renderBar(0)));
-check("100% is all solid", renderBar(1) === F.repeat(8));
-check(">100% clamps to full", renderBar(1.5) === F.repeat(8));
-check("NaN is empty rather than broken", renderBar(Number.NaN) === E.repeat(8));
-check("2% fills the cell it is in", renderBar(0.02) === F + E.repeat(7), JSON.stringify(renderBar(0.02)));
-check("24% ends on the second pill", renderBar(0.24) === F.repeat(2) + E.repeat(6), JSON.stringify(renderBar(0.24)));
-check("26% is already in the third pill", renderBar(0.26) === F.repeat(3) + E.repeat(5), JSON.stringify(renderBar(0.26)));
-check("50% is four and four", renderBar(0.5) === F.repeat(4) + E.repeat(4), JSON.stringify(renderBar(0.5)));
-check("99% keeps one pill hollow by default", renderBar(0.99) === F.repeat(7) + E, JSON.stringify(renderBar(0.99)));
-check("glyphs are configurable", renderBar(0, { glyphs: { fill: "\u25aa", empty: "\u25ab" } }) === "\u25ab".repeat(8));
-check("minimum is honoured", renderBar(0.04, { minimum: 3 }) === F.repeat(3) + E.repeat(5));
-check("maximum is honoured below 100 %", renderBar(0.999, { maximum: 6 }) === F.repeat(6) + E.repeat(2));
-check("a full bar ignores maximum", renderBar(1, { maximum: 7 }) === F.repeat(8));
+const bar = (used) => F.repeat(used) + E.repeat(BAR_WIDTH - used);
 
-// glyph families: with colour both halves share the solid glyph, without colour
-// the track goes hollow so shape still carries the difference.
+check("the bar has ten pills", BAR_WIDTH === 10);
+
+// The whole scale, every printed percentage: 0 only at 0 %, full only at
+// 100 %, and the nine states in between take exactly eleven points each.
+{
+  const bands = new Map();
+  let previous = 0;
+  let steps = true;
+  let widths = true;
+  let shapes = true;
+  for (let percent = 0; percent <= 100; percent++) {
+    const rendered = renderBar(percent);
+    const used = pillsFor(percent);
+    if (rendered !== bar(used)) shapes = false;
+    if (visibleWidth(rendered) !== BAR_WIDTH) widths = false;
+    if (used - previous !== 0 && used - previous !== 1) steps = false;
+    previous = used;
+    bands.set(used, [...(bands.get(used) ?? []), percent]);
+  }
+  check("every percentage renders used pills then hollow ones, no gap", shapes);
+  check("every bar is exactly ten columns", widths);
+  check("the bar climbs one pill at a time and never skips one", steps);
+  check("all eleven states are reached", bands.size === 11);
+  check("empty only at 0 %", bands.get(0)?.join() === "0");
+  check("full only at 100 %", bands.get(10)?.join() === "100");
+  const uniform = [1, 2, 3, 4, 5, 6, 7, 8, 9].every((used) => bands.get(used)?.length === 11);
+  check("each intermediate pill covers exactly eleven points", uniform, JSON.stringify([...bands].map(([k, v]) => [k, v[0], v.at(-1)])));
+  const expected = [[1, 1, 11], [2, 12, 22], [3, 23, 33], [4, 34, 44], [5, 45, 55], [6, 56, 66], [7, 67, 77], [8, 78, 88], [9, 89, 99]];
+  check(
+    "the documented bands are the real ones",
+    expected.every(([used, from, to]) => bands.get(used)?.[0] === from && bands.get(used)?.at(-1) === to),
+  );
+}
+
+check("1% already lights the first pill", renderBar(1) === bar(1));
+check("50% is exactly half", renderBar(50) === bar(5));
+check("54% is still half", renderBar(54) === bar(5));
+check("56% is the sixth pill", renderBar(56) === bar(6));
+check("99% keeps one pill hollow", renderBar(99) === bar(9));
+check(">100% clamps to full", renderBar(150) === bar(10));
+check("negative clamps to empty", renderBar(-5) === bar(0));
+check("NaN is empty rather than broken", renderBar(Number.NaN) === bar(0));
+check("a fractional percentage is rounded first", renderBar(55.4) === bar(5) && renderBar(55.6) === bar(6));
+check("glyphs are configurable", renderBar(0, { glyphs: { fill: "\u25aa", empty: "\u25ab" } }) === "\u25ab".repeat(BAR_WIDTH));
+check("the width is configurable and stays uniform", renderBar(50, { width: 4 }) === F.repeat(2) + E.repeat(2) && renderBar(100, { width: 4 }) === F.repeat(4));
+
 for (const mode of ["truecolor", "ansi256", "none"]) {
-  const bar = renderBar(0.5, {
+  const painted = renderBar(50, {
     glyphs: glyphsFor("pill"),
     fill: (text) => paintBrand(text, mode),
     empty: (text) => paintBrand(text, mode),
   });
-  check(`${mode}: painted bar keeps the plain geometry`, stripAnsi(bar) === renderBar(0.5, { glyphs: glyphsFor("pill") }));
-  check(`${mode}: both halves use the same colour`, new Set((bar.match(/\u001b\[[0-9;]*m/g) ?? []).filter((c) => c !== "\u001b[39m")).size <= 1, JSON.stringify(bar));
-  check(`${mode}: still ${BAR_WIDTH} columns`, visibleWidth(bar) === BAR_WIDTH, `got ${visibleWidth(bar)}`);
+  check(`${mode}: painted bar keeps the plain geometry`, stripAnsi(painted) === renderBar(50));
+  check(`${mode}: both halves use the same colour`, new Set((painted.match(/\u001b\[[0-9;]*m/g) ?? []).filter((c) => c !== "\u001b[39m")).size <= 1, JSON.stringify(painted));
+  check(`${mode}: still ${BAR_WIDTH} columns`, visibleWidth(painted) === BAR_WIDTH, `got ${visibleWidth(painted)}`);
 }
-check("pill family is solid against hollow", glyphsFor("pill").fill === "\u25b0" && glyphsFor("pill").empty === "\u25b1");
+check("pill family is solid against hollow", glyphsFor("pill").fill === F && glyphsFor("pill").empty === E);
 check("safe family uses squares", glyphsFor("safe").fill === "\u25aa" && glyphsFor("safe").empty === "\u25ab");
 
 // ---------------------------------------------------------------------------
@@ -396,9 +421,16 @@ const deepSeek = renderStatus(quotaSnapshot, {
   theme: plainTheme,
   mode: "none",
 });
-check("active model bar and percent", /^nan \u25b0{2}\u25b1{6}  20% /.test(deepSeek ?? ""), JSON.stringify(deepSeek));
+check("active model bar and percent", /^nan \u25b0{2}\u25b1{8}  20% /.test(deepSeek ?? ""), JSON.stringify(deepSeek));
 check("reset countdown is compact", (deepSeek ?? "").includes("24d3h"), JSON.stringify(deepSeek));
 check("segment fits the cap", visibleWidth(deepSeek ?? "") <= MAX_SEGMENT_WIDTH);
+for (const used of [1.5e9, 1.5012e9, 1.514e9]) {
+  const half = stripAnsi(renderStatus(
+    snapshot([model({ model: "deepseek-v4-flash", cap: 3e9, tokensUsed: used, remaining: 3e9 - used, periodEnd: "2026-12-01T00:00:00Z" })]),
+    { now: NOW, activeModelId: "deepseek-v4-flash", theme: plainTheme, mode: "none" },
+  ) ?? "");
+  check(`a raw ${((used / 3e9) * 100).toFixed(2)}% printed as 50% draws exactly half`, half.startsWith(`nan ${bar(5)}  50% `), half);
+}
 
 const precise = renderStatus(quotaSnapshot, {
   now: NOW,
@@ -527,7 +559,7 @@ const pool = snapshot([
   model({ model: "mimo-v2.6-flash", cap: 1e9, tokensUsed: 9e8, remaining: 1e8, extraTokens: 5e7, extraUsable: false }),
 ]);
 const pooledStatus = stripAnsi(renderStatus(pool, { now: NOW, activeModelId: "qwen3.8-flash", theme: plainTheme, mode: "none", width: 120 }) ?? "");
-check("a usable pool is shown next to the percentage", pooledStatus.startsWith("nan \u25b0".repeat(1) + "\u25b0".repeat(7) + " 100% +125M"), pooledStatus);
+check("a usable pool is shown next to the percentage", pooledStatus.startsWith(`nan ${bar(10)} 100% +125M`), pooledStatus);
 check("alerts carry their pool too", pooledStatus.includes("glm5.3-flash 95% +50.0M"), pooledStatus);
 check("a paused pool is not advertised in the footer", !pooledStatus.includes("mimo-v2.6-flash 90% +"), pooledStatus);
 check(
@@ -794,8 +826,8 @@ const reportLines = reportText.split("\n");
 note(reportLines[0]);
 
 check("header carries the period and the reset", reportLines[0] === "NaN · period 2026-11-01 → 2026-12-01 (resets in 24d 3h)", reportLines[0]);
-check("deepseek row is aligned and complete", /^ {2}deepseek-v4-flash +\u25b0{2}\u25b1{6} +20% +614\.6M \/ 3\.0B +2\.4B free$/.test(reportLines[2]), JSON.stringify(reportLines[2]));
-check("glm5.3-flash row", /^ {2}glm5\.3-flash +\u25b0{3}\u25b1{5} +26% +529\.3M \/ 2\.0B +1\.5B free$/.test(reportLines[3]), JSON.stringify(reportLines[3]));
+check("deepseek row is aligned and complete", /^ {2}deepseek-v4-flash +\u25b0{2}\u25b1{8} +20% +614\.6M \/ 3\.0B +2\.4B free$/.test(reportLines[2]), JSON.stringify(reportLines[2]));
+check("glm5.3-flash row", /^ {2}glm5\.3-flash +\u25b0{3}\u25b1{7} +26% +529\.3M \/ 2\.0B +1\.5B free$/.test(reportLines[3]), JSON.stringify(reportLines[3]));
 check("a member key's table has the four models it can call", (reportText.match(/ free/g) ?? []).length === 4);
 check("the premium model is not listed for a member key", !/^ {2}glm5\.3 /m.test(reportText));
 const premiumText = renderQuotaReport({

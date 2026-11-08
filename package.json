@@ -1,6 +1,6 @@
 {
   "name": "pi-nan-quota",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "NaN Builders quota in the pi footer: a violet bar for the active model, plan-aware via NaN's own model list, and a /nan-quota breakdown. Read-only.",
   "type": "module",
   "license": "GPL-3.0-or-later",

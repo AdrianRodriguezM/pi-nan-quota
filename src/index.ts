@@ -12,7 +12,7 @@
  *
  * keeps the last good answer in memory, and paints one status line:
  *
- *     nan ▰▰▰▰▰▱▱▱  62% 4d3h · glm5.3-flash 91%
+ *     nan ▰▰▰▰▰▰▱▱▱▱  62% 4d3h · glm5.3-flash 91%
  *
  * `/nan-quota` prints the per-model table in the transcript as a custom entry,
  * which pi keeps out of the model's context.

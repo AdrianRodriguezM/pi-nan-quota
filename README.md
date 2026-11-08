@@ -6,7 +6,7 @@ with the per-model breakdown.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/AdrianRodriguezM/pi-nan-quota/main/docs/preview.png"
-       alt="The /nan-quota table with violet usage bars per model, and the footer segment: nan, an eight-pill bar, 20%, 24d3h"
+       alt="The /nan-quota table with violet usage bars per model, and the footer segment: nan, a ten-pill bar, 20%, 24d3h"
        width="713">
 </p>
 
@@ -49,21 +49,36 @@ Drawn only while the active model talks to NaN (or always, with `alwaysShow`):
 
 | Situation | Segment |
 |---|---|
-| Monthly cap, 20 % used, resets in 24 days | `nan ▰▰▱▱▱▱▱▱  20% 24d3h` |
-| Another model is about to run out | `nan ▰▰▰▰▰▰▱▱  71% 24d3h · glm5.3-flash 88%` |
-| Cap reached, a purchased extra pool is backing it | `nan ▰▰▰▰▰▰▰▰ 100% +125M 24d3h` |
+| Monthly cap, 20 % used, resets in 24 days | `nan ▰▰▱▱▱▱▱▱▱▱  20% 24d3h` |
+| Another model is about to run out | `nan ▰▰▰▰▰▰▰▱▱▱  71% 24d3h · glm5.3-flash 88%` |
+| Cap reached, a purchased extra pool is backing it | `nan ▰▰▰▰▰▰▰▰▰▰ 100% +125M 24d3h` |
 | A model NaN does not cap (`qwen3.6`, `gemma4`, new models) | `nan no cap · 427 this month` |
 | A model your plan does not include (`glm5.3` on a member key) | `nan glm5.3 not in your plan` |
 | A model NaN no longer serves (`glm5.2`) | `nan glm5.2 not available on this key` |
 | First read still in flight, or no key | `nan ···` |
-| Last refresh failed; the bar is 40 minutes old | `nan ▰▰▱▱▱▱▱▱  20% 24d3h ·40m` |
+| Last refresh failed; the bar is 40 minutes old | `nan ▰▰▱▱▱▱▱▱▱▱  20% 24d3h ·40m` |
 | The active model is not a NaN one | *(nothing)* |
 
-The bar is eight pills, `▰` for the used part and `▱` for the rest, all in NaN's
-violet `#7D39EB`, with no gap between the two parts. The pill the usage is
-currently in counts as used, so any usage at all lights the first pill and the
-bar always ends on a solid one. The bar is always eight columns and the
-percentage four, so nothing in the footer moves as the numbers change.
+The bar is ten pills, `▰` for the used part and `▱` for the rest, all in NaN's
+violet `#7D39EB`, with no gap between the two parts. The scale is uniform: empty
+means nothing used, full means the cap is reached, and the nine steps in between
+share 1–99 % evenly, eleven points each:
+
+| Used | Bar | | Used | Bar |
+|---|---|---|---|---|
+| 0 % | `▱▱▱▱▱▱▱▱▱▱` | | 56–66 % | `▰▰▰▰▰▰▱▱▱▱` |
+| 1–11 % | `▰▱▱▱▱▱▱▱▱▱` | | 67–77 % | `▰▰▰▰▰▰▰▱▱▱` |
+| 12–22 % | `▰▰▱▱▱▱▱▱▱▱` | | 78–88 % | `▰▰▰▰▰▰▰▰▱▱` |
+| 23–33 % | `▰▰▰▱▱▱▱▱▱▱` | | 89–99 % | `▰▰▰▰▰▰▰▰▰▱` |
+| 34–44 % | `▰▰▰▰▱▱▱▱▱▱` | | 100 % | `▰▰▰▰▰▰▰▰▰▰` |
+| 45–55 % | `▰▰▰▰▰▱▱▱▱▱` | | | |
+
+So the bar climbs one pill at a time, never skips one, lights the first pill at
+the first unit of usage, is exactly half around 50 %, and is only full at the
+cap. It is drawn from the printed percentage, so the two always agree. The scale
+is the same for every model: it is a share of that model's own cap. The bar is
+always ten columns and the percentage four, so nothing in the footer moves as the
+numbers change.
 
 From `warnAt` (80 %) the used part and the alerts switch to your theme's warning
 colour, from `criticalAt` (95 %) to its error colour.
@@ -73,10 +88,10 @@ colour, from `criticalAt` (95 %) to its error colour.
 ```
 NaN · period 2026-11-01 → 2026-12-01 (resets in 24d 3h)
 
-  deepseek-v4-flash  ▰▰▱▱▱▱▱▱  20%   614.6M / 3.0B    2.4B free
-  glm5.3-flash       ▰▰▰▱▱▱▱▱  26%   529.3M / 2.0B    1.5B free
-  mimo-v2.6-flash    ▰▱▱▱▱▱▱▱   2%    19.1M / 1.0B  980.9M free
-  qwen3.8-flash      ▰▱▱▱▱▱▱▱   7%    34.5M / 500M  465.5M free
+  deepseek-v4-flash  ▰▰▱▱▱▱▱▱▱▱  20%   614.6M / 3.0B    2.4B free
+  glm5.3-flash       ▰▰▰▱▱▱▱▱▱▱  26%   529.3M / 2.0B    1.5B free
+  mimo-v2.6-flash    ▰▱▱▱▱▱▱▱▱▱   2%    19.1M / 1.0B  980.9M free
+  qwen3.8-flash      ▰▱▱▱▱▱▱▱▱▱   7%    34.5M / 500M  465.5M free
 
 other models this month: qwen3-embedding 14.8k · qwen3.6 427 · gemma4 135
 

@@ -23,7 +23,7 @@ import { FetchError, type ModelQuota } from "../types.ts";
 export const QUOTA_URL = "https://cloud-api.nan.builders/api/usage/quota";
 
 /** Keep in sync with package.json `version` (a test enforces it). */
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 
 /** User-Agent header value; the API is friendlier when it can identify callers. */
 export const USER_AGENT = `pi-nan-quota/${VERSION}`;

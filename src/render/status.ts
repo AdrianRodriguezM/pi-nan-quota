@@ -8,9 +8,9 @@
  *
  * Shapes, widest first (the first that fits `MAX_SEGMENT_WIDTH` wins):
  *
- *   nan ▰▰▰▰▰▱▱▱  62% 4d3h · glm5.3-flash 91%
- *   nan ▰▰▰▰▰▱▱▱  62% 4d3h
- *   nan ▰▰▰▰▰▱▱▱  62%
+ *   nan ▰▰▰▰▰▰▱▱▱▱  62% 4d3h · glm5.3-flash 91%
+ *   nan ▰▰▰▰▰▰▱▱▱▱  62% 4d3h
+ *   nan ▰▰▰▰▰▰▱▱▱▱  62%
  *   nan 62%
  */
 
@@ -95,9 +95,8 @@ export function renderStatus(snapshot: Snapshot | undefined, options: StatusRend
 
   const percent = formatPercent(quota.tokensUsed, quota.cap);
   const tone = { mode: options.mode ?? "none", theme, warnAt, criticalAt };
-  const bar = renderBar(quota.cap > 0 ? quota.tokensUsed / quota.cap : 0, {
-    // From 1 % on, one cell: an almost untouched bar must not look untouched.
-    minimum: percent >= 1 ? 1 : 0,
+  // The bar is drawn from the printed percentage, so the two always agree.
+  const bar = renderBar(percent, {
     glyphs: glyphsFor(options.glyphStyle ?? "pill"),
     fill: (text) => paintUsage(text, percent, tone),
     // Same violet as the used cells: a darker shade reads as black on a dark

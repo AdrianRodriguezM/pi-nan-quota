@@ -124,7 +124,8 @@ function buildRow(model: ModelQuota, estimated: boolean): Row {
   const percent = formatPercent(model.tokensUsed, model.cap);
   return {
     name: model.model,
-    bar: renderBar(model.tokensUsed / model.cap),
+    // From the printed percentage, so the row's bar and number always agree.
+    bar: renderBar(percent),
     percent: `${estimated ? "~" : ""}${percent}%`,
     used: formatTokens(model.tokensUsed),
     cap: formatTokens(model.cap),

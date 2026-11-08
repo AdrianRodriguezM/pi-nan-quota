@@ -1,21 +1,36 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /**
- * The footer bar: eight pills in a row, all of them in one violet.
+ * The footer bar: ten pills in a row, all of them in one violet.
  *
- *     ▰▰▱▱▱▱▱▱      21 %
- *     ▰▰▰▰▰▰▱▱      71 %
- *     ▰▰▰▰▰▰▰▰     100 %
- *     ▱▱▱▱▱▱▱▱       0 %
+ *     ▱▱▱▱▱▱▱▱▱▱       0 %
+ *     ▰▱▱▱▱▱▱▱▱▱    1–11 %
+ *     ▰▰▱▱▱▱▱▱▱▱   12–22 %
+ *     ▰▰▰▱▱▱▱▱▱▱   23–33 %
+ *     ▰▰▰▰▱▱▱▱▱▱   34–44 %
+ *     ▰▰▰▰▰▱▱▱▱▱   45–55 %
+ *     ▰▰▰▰▰▰▱▱▱▱   56–66 %
+ *     ▰▰▰▰▰▰▰▱▱▱   67–77 %
+ *     ▰▰▰▰▰▰▰▰▱▱   78–88 %
+ *     ▰▰▰▰▰▰▰▰▰▱   89–99 %
+ *     ▰▰▰▰▰▰▰▰▰▰     100 %
+ *
+ * The scale is uniform. An empty bar means nothing used and a full bar means
+ * the cap is reached, so the 99 values in between (1–99 %) are shared evenly
+ * by the nine intermediate states: exactly eleven points each, with the half
+ * bar centred on 50 %. Every step is one pill — the bar never skips one — and
+ * the first unit of usage always lights the first pill.
+ *
+ * It is driven by the *printed* percentage, not the raw ratio, so the bar and
+ * the number next to it can never disagree (a raw 50.04 % printed as `50%`
+ * once drew five pills of eight).
  *
  * No gap between the used and the unused part: a blank cell there reads as a
- * pill that is missing, right where the usage currently is. The cell that is in
- * progress counts as used (`ceil`), so the usage always ends on a solid pill.
+ * pill that is missing, right where the usage currently is.
  *
- * One colour, two shapes: the cells that have been used are solid and the rest
- * are hollow, and both are the same brand violet. A darker shade for the empty
- * half is *not* an option — on a dark terminal it reads as black, so half of the
- * bar looks like it disappeared. Colour carries the branding; the shape carries
- * the progress.
+ * One colour, two shapes: used pills are solid and the rest are hollow, both in
+ * the same brand violet. A darker shade for the unused part is *not* an option —
+ * on a dark terminal it reads as black, so half of the bar looks like it
+ * disappeared. Colour carries the branding; the shape carries the progress.
  *
  * `▰` and `▱` (U+25B0, U+25B1) are East Asian Width `N` (neutral), so they are
  * one column wide even on terminals that render ambiguous-width characters
@@ -29,8 +44,8 @@
  * testable without a terminal.
  */
 
-/** Cells in the bar, gap excluded. */
-export const BAR_WIDTH = 8;
+/** Pills in the bar. Ten gives nine equal 11-point steps between 0 and 100. */
+export const BAR_WIDTH = 10;
 
 /** Default family: parallelograms, solid for used cells, hollow for the rest. */
 export const PILL_GLYPHS = { fill: "\u25b0", empty: "\u25b1" } as const;
@@ -50,37 +65,44 @@ export function glyphsFor(style: GlyphStyle): Glyphs {
   return style === "safe" ? SAFE_GLYPHS : PILL_GLYPHS;
 }
 
+/**
+ * Used pills for a printed percentage: 0 only at 0 %, all of them only at
+ * 100 %, and `ceil(percent × (width − 1) / 99)` in between, which splits
+ * 1–99 % into `width − 1` equal steps.
+ */
+export function pillsFor(percent: number, width: number = BAR_WIDTH): number {
+  const cells = Math.max(1, Math.trunc(width));
+  const value = Number.isFinite(percent) ? Math.round(percent) : 0;
+  if (value <= 0) return 0;
+  if (value >= 100) return cells;
+  return Math.min(cells - 1, Math.max(1, Math.ceil((value * (cells - 1)) / 99)));
+}
+
 export interface BarOptions {
-  /** Cells in the bar (default {@link BAR_WIDTH}). */
+  /** Pills in the bar (default {@link BAR_WIDTH}). */
   width?: number;
   /** Glyph pair; {@link PILL_GLYPHS} by default. */
   glyphs?: Glyphs;
-  /** Painter for the used cells; identity when omitted. */
+  /** Painter for the used pills; identity when omitted. */
   fill?: (text: string) => string;
-  /** Painter for the unused cells; identity when omitted. */
+  /** Painter for the unused pills; identity when omitted. */
   empty?: (text: string) => string;
-  /** Minimum used cells while `0 < ratio < 1` (`ceil` already gives 1). */
-  minimum?: number;
-  /** Maximum used cells while `0 < ratio < 1`; defaults to `width - 1`. */
-  maximum?: number;
 }
 
-/** Render the bar for `ratio` in `[0, 1]`; always `width` columns. */
-export function renderBar(ratio: number, options: BarOptions = {}): string {
-  const width = options.width ?? BAR_WIDTH;
+/**
+ * Render the bar for a printed percentage (`0`–`100`; rounded, clamped, and
+ * `NaN` counts as 0). Always `width` columns.
+ */
+export function renderBar(percent: number, options: BarOptions = {}): string {
+  const width = Math.max(1, Math.trunc(options.width ?? BAR_WIDTH));
   const glyphs = options.glyphs ?? PILL_GLYPHS;
   const fill = options.fill ?? identity;
   const empty = options.empty ?? identity;
 
-  const clamped = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
-  if (clamped <= 0) return empty(glyphs.empty.repeat(width));
-  if (clamped >= 1) return fill(glyphs.fill.repeat(width));
-
-  const floor = Math.min(width, Math.max(0, Math.trunc(options.minimum ?? 0)));
-  const ceiling = Math.min(width, Math.max(1, Math.trunc(options.maximum ?? width - 1)));
-  // The cell the usage is currently in is drawn solid: the bar ends on a pill.
-  const used = Math.min(ceiling, Math.max(1, floor, Math.ceil(clamped * width)));
-  return fill(glyphs.fill.repeat(used)) + empty(glyphs.empty.repeat(width - used));
+  const used = pillsFor(percent, width);
+  const usedPart = used > 0 ? fill(glyphs.fill.repeat(used)) : "";
+  const emptyPart = used < width ? empty(glyphs.empty.repeat(width - used)) : "";
+  return usedPart + emptyPart;
 }
 
 const identity = (text: string): string => text;

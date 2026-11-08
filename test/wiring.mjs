@@ -204,7 +204,7 @@ section("status segment on a NaN model");
   await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
   const status = lastStatus(harness.statuses) ?? "";
   check("0% still shows a violet bar", status.includes("\u001b[38;2;125;57;235m"));
-  check("0% is all hollow cells", (stripAnsi(status).match(/\u25b1/g) ?? []).length === 8);
+  check("0% is all hollow cells", (stripAnsi(status).match(/\u25b1/g) ?? []).length === 10);
   check("0% reads as a zero", stripAnsi(status).includes("0%"));
 
   // 4 % used: rounding alone would leave the bar visually empty.
@@ -212,7 +212,7 @@ section("status segment on a NaN model");
   const almost = makeHarness({ modelId: "qwen3.8-flash" });
   await almost.handlers.get("session_start")({ reason: "startup" }, almost.ctx);
   const almostStatus = lastStatus(almost.statuses) ?? "";
-  check("4% paints one filled cell, no gap after it", stripAnsi(almostStatus).startsWith("nan \u25b0\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1\u25b1"), JSON.stringify(stripAnsi(almostStatus)));
+  check("4% paints one filled cell, no gap after it", stripAnsi(almostStatus).startsWith("nan \u25b0" + "\u25b1".repeat(9) + "   4%"), JSON.stringify(stripAnsi(almostStatus)));
   check("4% still reports 4%", stripAnsi(almostStatus).includes(" 4%"));
 }
 

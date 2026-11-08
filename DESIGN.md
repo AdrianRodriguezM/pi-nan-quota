@@ -52,15 +52,20 @@ printed.
   that render `getExtensionStatuses()`; a second footer would fight them.
 - **The bar** — settled with the owner after several rejected attempts; do not
   change it without asking:
-  - eight `▰` / `▱` pills, the shape that was chosen over blocks;
+  - ten `▰` / `▱` pills, the shape that was chosen over blocks;
   - **one colour for both halves**, the brand violet `#7D39EB` (256-colour
     `99`). A darker violet for the unused half reads as black on dark terminals
     and was reported as "the bar disappears";
   - **no gap** between used and unused pills: a blank cell there reads as a
     missing pill;
-  - used pills = `ceil(ratio × 8)`, at most 7 below 100 %: the pill the usage is
-    in is solid, so the bar always ends on a solid violet pill;
-  - fixed width (8 columns, percentage padded to 4) so the footer never jumps.
+  - **a uniform scale, driven by the printed percentage**: 0 pills only at 0 %,
+    10 only at 100 %, and `ceil(percent × 9 / 99)` in between, so each of the
+    nine intermediate states covers exactly eleven points (1–11, 12–22, …,
+    89–99) and 45–55 % is the half bar. Eight pills with `ceil` on the raw ratio
+    shipped in 0.1.0 and drew five of eight next to a printed `50%`; eight pills
+    cannot split 1–99 % evenly at all (14.1 points each), which is why the bar
+    moved to ten. A test walks all 101 percentages;
+  - fixed width (10 columns, percentage padded to 4) so the footer never jumps.
 - Theme `warning` / `error` take over the used pills from `warnAt` / `criticalAt`:
   a quota about to run out should look like a warning, not like branding.
 - `▰`/`▱` are East Asian Width neutral (one column everywhere). Fonts without them

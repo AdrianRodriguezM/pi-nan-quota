@@ -6,13 +6,30 @@ All notable changes to this project are documented here. The format follows
 quota endpoint it reads is undocumented, and a minor release may change
 behaviour to follow NaN.
 
+## [0.1.1] - 2026-11-08
+
+### Fixed
+
+- The bar could disagree with the percentage printed next to it: a raw 50.04 %
+  printed as `50%` drew five pills of eight, because the bar rounded the raw
+  ratio up while the number rounded to the nearest. The bar is now drawn from
+  the printed percentage.
+
+### Changed
+
+- The bar has ten pills on a uniform scale. Empty only at 0 %, full only at
+  100 %, and each of the nine steps in between covers exactly eleven points
+  (1–11 %, 12–22 %, …, 89–99 %), so it climbs one pill at a time and 45–55 % is
+  exactly half. Eight pills could not split the range evenly. The segment is
+  two columns wider.
+
 ## [0.1.0] - 2026-11-07
 
 First release.
 
 ### Added
 
-- Footer segment for the active NaN model: an eight-pill bar in NaN's violet, the
+- Footer segment for the active NaN model: a pill bar in NaN's violet, the
   percentage of the monthly cap, the time to reset, and alerts for other models
   over `warnAt`.
 - `/nan-quota` command with the per-model table, extra pools, the rolling window
@@ -34,4 +51,5 @@ First release.
 - Compatibility: pi ≥ 1.3.0, checked in CI by loading the package through a real
   pi at the oldest supported and the latest version.
 
+[0.1.1]: https://github.com/AdrianRodriguezM/pi-nan-quota/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/AdrianRodriguezM/pi-nan-quota/releases/tag/v0.1.0
