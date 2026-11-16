@@ -32,13 +32,24 @@ export function formatTokens(tokens: number): string {
   return String(Math.round(value));
 }
 
-/** Integer percentage of a cap. Rounding, never negative, may exceed 100. */
-export function formatPercent(used: number, cap: number): number {
-  if (!Number.isFinite(used) || !Number.isFinite(cap) || cap <= 0) return 0;
-  return Math.max(0, Math.round((used / cap) * 100));
+/** 3745.5 -> "3745.5", 7000 -> "7000", 0 -> "0": one decimal, no trailing ".0". */
+export function formatCredits(credits: number): string {
+  if (!Number.isFinite(credits)) return "0";
+  const text = Math.max(0, credits).toFixed(1);
+  return text.endsWith(".0") ? text.slice(0, -2) : text;
 }
 
-/** Compact "time until reset": `4d3h`, `3h20m`, `12m`. */
+const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/** `2026-11-02…` / `2026-11-02T16:50:43Z` -> `Nov 2` (no leading zero). */
+export function shortMonthDate(value: string): string {
+  const month = Number.parseInt(value.slice(5, 7), 10);
+  const day = Number.parseInt(value.slice(8, 10), 10);
+  if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(day)) return value;
+  return `${MONTHS_EN[month - 1]} ${day}`;
+}
+
+/** Compact "time until": `4d3h`, `3h20m`, `12m`. */
 export function formatReset(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "0m";
   const totalMinutes = Math.floor(ms / 60_000);
@@ -56,6 +67,16 @@ export function formatResetLong(ms: number): string {
   const match = /^(\d+)([dhm])(\d+)([hm])$/.exec(compact);
   if (match) return `${match[1]}${match[2]} ${match[3]}${match[4]}`;
   return compact;
+}
+
+/** Coarse "time until", one unit: `8d`, `20h`, `45m` (for `~8d` run-outs). */
+export function formatUntil(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0m";
+  const days = ms / 86_400_000;
+  if (days >= 1) return `${Math.round(days)}d`;
+  const hours = ms / 3_600_000;
+  if (hours >= 1) return `${Math.round(hours)}h`;
+  return `${Math.max(1, Math.round(ms / 60_000))}m`;
 }
 
 /** Age of the last good read, as the footer suffix: `5m`, `2h`. */

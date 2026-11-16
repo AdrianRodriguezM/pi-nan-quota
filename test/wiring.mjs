@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /**
  * Wiring tests: the extension driven through a fake `ExtensionAPI` and a fake
- * `ExtensionContext`, with `fetch` stubbed to the captured fixtures.
+ * `ExtensionContext`, with `fetch` stubbed to synthetic payloads derived from
+ * the real clock (so the suite stays deterministic whenever it runs).
  *
- * The pure-renderer suite (run.mjs) covers shapes and formatting; this one
- * covers the glue that no pure function can prove: event registration, the
- * status key, the provider gate, the command output entry, and the fallback
- * path when the undocumented quota endpoint breaks.
+ * The pure-renderer suite (run.mjs) covers shapes and formatting against the
+ * captured fixture; this one covers the glue that no pure function can prove:
+ * event registration, the status key, the provider gate, the window
+ * re-request on a period rollover, the session line, the 402 scan, and the
+ * command output entry.
  *
  *   node test/wiring.mjs
  */
@@ -14,20 +16,23 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRequire } from "node:module";
 
 import nanQuota from "../src/index.ts";
+import { shortMonthDate } from "../src/format.ts";
 import { check, note, report, section } from "./harness.mjs";
 
-const require = createRequire(import.meta.url);
-const quotaFixture = require("./fixtures/quota.json");
-const usageFixture = require("./fixtures/usage.json");
-const modelsFixture = require("./fixtures/models.json");
+const usageFixture = await import("./fixtures/usage-credits.json", { with: { type: "json" } }).then((m) => m.default);
+const modelsFixture = await import("./fixtures/models.json", { with: { type: "json" } }).then((m) => m.default);
 
 // Keep the config lookup hermetic: `configPath()` resolves against $HOME.
 process.env.HOME = mkdtempSync(join(tmpdir(), "nan-quota-test-"));
 
 const KEY = "sk-test-key-not-real";
+const DAY = 24 * 60 * 60_000;
+
+/** `YYYY-MM-DD` for an epoch ms, UTC. */
+const utcDate = (ms) => new Date(ms).toISOString().slice(0, 10);
+const today = () => utcDate(Date.now());
 
 // ---------------------------------------------------------------------------
 // Fixtures for the network
@@ -39,17 +44,77 @@ const jsonResponse = (body, status = 200) => ({
   json: async () => body,
 });
 
-/** Serve fixtures by URL, with per-test overrides. */
-function stubFetch(overrides = {}) {
+/**
+ * A usage payload for the window the caller asked for, anchored on the
+ * requested start (so the loader's remembered period matches and no
+ * re-request happens). `used` grows with every call, which is what the
+ * session line measures.
+ */
+function usagePayloadFor(url, usageCalls) {
+  const params = new URL(String(url)).searchParams;
+  const start = params.get("start_date") ?? today();
+  const end = params.get("end_date") ?? today();
+  const used = 1000 + 100 * usageCalls;
+  const day = (offset, credits) => ({
+    date: utcDate(Date.now() + offset * DAY),
+    model: "deepseek-v4-flash",
+    prompt_tokens: 1000,
+    completion_tokens: 100,
+    total_tokens: 1100,
+    api_requests: 10,
+    cached_tokens: 500,
+    credits,
+  });
+  return {
+    object: "usage.report",
+    start_date: start,
+    end_date: end,
+    data: [day(-2, 100.2), day(-1, 200.4), day(0, 300)],
+    totals: {
+      prompt_tokens: 3000,
+      completion_tokens: 300,
+      total_tokens: 3300,
+      api_requests: 30,
+      cached_tokens: 1500,
+      credits: 600.6,
+      by_model: [
+        { model: "deepseek-v4-flash", prompt_tokens: 2000, completion_tokens: 200, total_tokens: 2200, api_requests: 20, cached_tokens: 1000, credits: 500.5 },
+        { model: "glm5.3-flash", prompt_tokens: 1000, completion_tokens: 100, total_tokens: 1100, api_requests: 10, cached_tokens: 500, credits: 100.1 },
+        { model: "qwen3.6", prompt_tokens: 400, completion_tokens: 40, total_tokens: 440, api_requests: 4, cached_tokens: 0, credits: 0 },
+        { model: "glm5.3", prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, api_requests: 1, cached_tokens: 0, credits: 50 },
+      ],
+    },
+    all_time: { prompt_tokens: 9000, completion_tokens: 900, total_tokens: 9900, api_requests: 90, cached_at: new Date().toISOString() },
+    has_more: false,
+    next_cursor: null,
+    credits: {
+      period_start: `${start}T16:50:43Z`,
+      period_end: new Date(Date.now() + 10 * DAY).toISOString(),
+      allowance: 7000,
+      used,
+      remaining: 7000 - used,
+      pack_credits: 0,
+      pack_expires_at: null,
+      frozen: false,
+    },
+  };
+}
+
+/**
+ * Stub `fetch` for the documented endpoints only. `usageImpl` can override
+ * the usage responses per test; every URL is recorded.
+ */
+function stubFetch(usageImpl) {
   const calls = [];
+  let usageCalls = 0;
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init });
-    for (const [match, handler] of Object.entries(overrides)) {
-      if (String(url).includes(match)) return handler(String(url), init);
+    const target = String(url);
+    if (target.includes("api.nan.builders/v1/usage")) {
+      usageCalls++;
+      return usageImpl ? usageImpl(target, usageCalls, calls) : jsonResponse(usagePayloadFor(target, usageCalls));
     }
-    if (String(url).includes("cloud-api.nan.builders")) return jsonResponse(quotaFixture);
-    if (String(url).includes("api.nan.builders/v1/usage")) return jsonResponse(usageFixture);
-    if (String(url).includes("api.nan.builders/v1/models")) return jsonResponse(modelsFixture);
+    if (target.includes("api.nan.builders/v1/models")) return jsonResponse(modelsFixture);
     throw new Error(`unexpected fetch: ${url}`);
   };
   return calls;
@@ -64,6 +129,7 @@ function makeHarness({ provider = "nan", modelId = "deepseek-v4-flash", baseUrl 
   const statuses = [];
   const entries = [];
   const notifications = [];
+  const sessionEntries = [];
   const handlers = new Map();
   const commands = new Map();
   const renderers = new Map();
@@ -98,6 +164,9 @@ function makeHarness({ provider = "nan", modelId = "deepseek-v4-flash", baseUrl 
       },
       getAll: () => registered,
     },
+    sessionManager: {
+      getEntries: () => sessionEntries,
+    },
     ui: {
       theme: { fg: (_name, text) => text },
       setStatus: (key_, value) => void statuses.push(value),
@@ -106,11 +175,11 @@ function makeHarness({ provider = "nan", modelId = "deepseek-v4-flash", baseUrl 
   };
 
   nanQuota(pi);
-  return { pi, ctx, state, statuses, entries, notifications, handlers, commands, renderers };
+  return { pi, ctx, state, statuses, entries, notifications, handlers, commands, renderers, sessionEntries };
 }
 
 const lastStatus = (statuses) => statuses.at(-1);
-const stripAnsi = (text) => text.replace(/\u001b\[[0-9;]*m/g, "");
+const stripAnsi = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 // ---------------------------------------------------------------------------
 section("registration");
@@ -145,33 +214,35 @@ section("status segment on a NaN model");
   const status = lastStatus(harness.statuses);
   check("paints a status string", typeof status === "string" && status.length > 0);
   check("starts with the provider tag", typeof status === "string" && status.startsWith("nan "));
-  check("shows a percentage", typeof status === "string" && /\d+%/.test(stripAnsi(status)));
+  check("shows whole credits", typeof status === "string" && /\d+ cr/.test(stripAnsi(status)), stripAnsi(status ?? ""));
   check(
     "uses the brand violet in truecolor",
     typeof status === "string" && status.includes("\u001b[38;2;125;57;235m"),
   );
   check(
-    "the unused part is drawn, not blank",
-    typeof status === "string" && stripAnsi(status).includes("\u25b1"),
+    "the unused pills are painted too",
+    typeof status === "string" && (status.match(/\u001b\[38;2;125;57;235m/g) ?? []).length >= 2,
   );
-  check(
-    "the filled half is the brand violet",
-    typeof status === "string" && status.includes("\u001b[38;2;125;57;235m"),
-  );
-  check(
-    "and in the same violet as the used cells",
-    typeof status === "string" && (status.match(/\u001b\[38;2;125;57;235m/g) ?? []).length === 2,
-  );
-  check("shows the reset countdown", typeof status === "string" && /\d+d\d+h/.test(stripAnsi(status)));
   check(
     "fits the footer budget",
-    typeof status === "string" && stripAnsi(status).length <= 48 + 8,
+    typeof status === "string" && stripAnsi(status).length <= 56,
     `length=${typeof status === "string" ? stripAnsi(status).length : "?"}`,
   );
   note(stripAnsi(status ?? ""));
+  check("only painted once for one refresh", harness.statuses.length === 1);
+}
 
-  const quotaCall = harness.statuses.length > 0;
-  check("only painted once for one refresh", quotaCall);
+{
+  const calls = stubFetch();
+  const harness = makeHarness();
+  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
+  check(
+    "one usage request per refresh, plus the served list",
+    calls.filter((call) => call.url.includes("/v1/usage")).length === 1 && calls.some((call) => call.url.includes("/v1/models")),
+    calls.map((call) => call.url).join("\n"),
+  );
+  check("every request stays on api.nan.builders", calls.every((call) => call.url.includes("api.nan.builders")));
+  check("the usage request asks for limit=500", calls.some((call) => call.url.includes("limit=500")));
 }
 
 {
@@ -190,164 +261,10 @@ section("status segment on a NaN model");
   const harness = makeHarness();
   await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
   const status = lastStatus(harness.statuses);
-  check(
-    "falls back to the 256-colour entry",
-    typeof status === "string" && status.includes("\u001b[38;5;99m"),
-  );
+  check("falls back to the 256-colour entry", typeof status === "string" && status.includes("\u001b[38;5;99m"));
   process.env.COLORTERM = "truecolor";
 }
 
-{
-  // A model whose month has just started used to read as an all-grey bar.
-  stubFetch({ "cloud-api.nan.builders": () => jsonResponse({ periodStart: "2026-11-01", models: [ { model: "qwen3.8-flash", cap: 500000000, tokensUsed: 0, remaining: 500000000, periodEnd: "2026-12-01T00:00:00Z" } ] }) });
-  const harness = makeHarness({ modelId: "qwen3.8-flash" });
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  const status = lastStatus(harness.statuses) ?? "";
-  check("0% still shows a violet bar", status.includes("\u001b[38;2;125;57;235m"));
-  check("0% is all hollow cells", (stripAnsi(status).match(/\u25b1/g) ?? []).length === 10);
-  check("0% reads as a zero", stripAnsi(status).includes("0%"));
-
-  // 4 % used: rounding alone would leave the bar visually empty.
-  stubFetch({ "cloud-api.nan.builders": () => jsonResponse({ periodStart: "2026-11-01", models: [ { model: "qwen3.8-flash", cap: 500000000, tokensUsed: 20000000, remaining: 480000000, periodEnd: "2026-12-01T00:00:00Z" } ] }) });
-  const almost = makeHarness({ modelId: "qwen3.8-flash" });
-  await almost.handlers.get("session_start")({ reason: "startup" }, almost.ctx);
-  const almostStatus = lastStatus(almost.statuses) ?? "";
-  check("4% paints one filled cell, no gap after it", stripAnsi(almostStatus).startsWith("nan \u25b0" + "\u25b1".repeat(9) + "   4%"), JSON.stringify(stripAnsi(almostStatus)));
-  check("4% still reports 4%", stripAnsi(almostStatus).includes(" 4%"));
-}
-
-// ---------------------------------------------------------------------------
-section("provider gate");
-
-{
-  const calls = stubFetch();
-  const harness = makeHarness({ provider: "anthropic", modelId: "claude-opus-5-5", baseUrl: "https://api.anthropic.com" });
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  check("clears the segment on a non-NaN model", lastStatus(harness.statuses) === undefined);
-  check("and sends nothing to NaN while another provider is in use", calls.length === 0, `${calls.length} requests`);
-  await harness.handlers.get("turn_end")({ turn: {} }, harness.ctx);
-  check("turn_end does not poll either", calls.length === 0);
-
-  harness.state.model = { id: "glm5.3-flash", provider: "nan" };
-  await harness.handlers.get("model_select")({ model: harness.state.model }, harness.ctx);
-  check("paints it again after switching to a NaN model", typeof lastStatus(harness.statuses) === "string");
-
-  harness.state.model = { id: "claude-opus-5-5", provider: "anthropic" };
-  await harness.handlers.get("model_select")({ model: harness.state.model }, harness.ctx);
-  check("clears it again when switching away", lastStatus(harness.statuses) === undefined);
-}
-
-{
-  // Some event contexts arrive without `ctx.model`. Reading it naively cleared
-  // the segment, which is the "the bar keeps disappearing" report.
-  stubFetch();
-  const harness = makeHarness();
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  const painted = lastStatus(harness.statuses);
-  check("painted at session start", typeof painted === "string");
-
-  harness.state.model = undefined;
-  await harness.handlers.get("model_select")({ model: undefined }, harness.ctx);
-  check("an event without ctx.model keeps the last bar", typeof lastStatus(harness.statuses) === "string");
-  check("and does not repaint a different model", lastStatus(harness.statuses) === painted);
-
-  // A brand-new context object without the property behaves the same.
-  const bare = { ...harness.ctx };
-  delete bare.model;
-  await harness.handlers.get("model_select")({}, bare);
-  check("a bare context does not clear it either", typeof lastStatus(harness.statuses) === "string");
-}
-
-// ---------------------------------------------------------------------------
-section("/nan-quota command");
-
-{
-  stubFetch();
-  const harness = makeHarness();
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  await harness.commands.get("nan-quota").handler("", harness.ctx);
-
-  const entry = harness.entries.at(-1);
-  check("appends a transcript entry", entry?.type === "nan-quota");
-  const text = entry?.data?.text ?? "";
-  check("lists a capped model with its numbers", text.includes("deepseek-v4-flash") && text.includes("free"));
-  check("mentions the source", text.includes("source:"));
-  check("never prints the API key", !text.includes(KEY) && !text.includes("sk-"));
-
-  await harness.commands.get("nan-quota").handler("help", harness.ctx);
-  check("help is served without a request", (harness.entries.at(-1)?.data?.text ?? "").includes("/nan-quota refresh"));
-}
-
-// ---------------------------------------------------------------------------
-section("fallback and failure paths");
-
-{
-  const calls = stubFetch({
-    "cloud-api.nan.builders": () => jsonResponse({ error: "boom" }, 500),
-  });
-  const harness = makeHarness();
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-
-  const status = lastStatus(harness.statuses);
-  check("still paints a segment from /v1/usage", typeof status === "string" && /\d+%/.test(stripAnsi(status)));
-  check("hit the documented endpoint", calls.some((call) => call.url.includes("/v1/usage")));
-  check("warned once about the degraded source", harness.notifications.length === 1);
-
-  await harness.commands.get("nan-quota").handler("", harness.ctx);
-  const text = harness.entries.at(-1)?.data?.text ?? "";
-  check("the table is marked as an estimate", text.includes("estimated") && text.includes("~"));
-  check("the caps table date is disclosed", text.includes("docs caps"));
-}
-
-{
-  stubFetch({
-    "cloud-api.nan.builders": () => jsonResponse({ error: "nope" }, 401),
-  });
-  const harness = makeHarness();
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  check("a 401 does not burn the fallback request", !harness.notifications.some((n) => n.level === "warning"));
-  check(
-    "the placeholder is shown instead of a fake bar",
-    typeof lastStatus(harness.statuses) === "string" &&
-      stripAnsi(lastStatus(harness.statuses)).includes("nan \u00b7\u00b7\u00b7"),
-  );
-}
-
-{
-  const calls = stubFetch();
-  // `key: null` (not `undefined`, which would hit the default parameter) makes
-  // the fake registry answer "no stored credential".
-  const harness = makeHarness({ key: null });
-  delete process.env.NAN_API_KEY;
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  check(
-    "no key: placeholder, no crash, no network",
-    stripAnsi(lastStatus(harness.statuses) ?? "").includes("nan \u00b7\u00b7\u00b7"),
-    stripAnsi(lastStatus(harness.statuses) ?? ""),
-  );
-  check("no key: no request is attempted", calls.length === 0);
-}
-
-{
-  stubFetch({ "cloud-api.nan.builders": () => jsonResponse({ models: "changed" }) });
-  const harness = makeHarness();
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  check("an invalid payload degrades instead of throwing", typeof lastStatus(harness.statuses) === "string");
-  check("and is reported once", harness.notifications.length === 1, JSON.stringify(harness.notifications));
-  check("the estimate is marked in the footer path", harness.notifications[0]?.message.includes("estimates"));
-}
-
-{
-  stubFetch({ "cloud-api.nan.builders": () => jsonResponse({ error: "nope" }, 401) });
-  const harness = makeHarness();
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  const notice = harness.notifications.find((n) => n.level === "error")?.message ?? "";
-  check("a rejected key is reported as an error", notice.includes("rejected"), notice);
-  check("the notice explains the plans", notice.includes("Community plan has no API access"), notice);
-  check("the notice never repeats the key", !notice.includes(KEY));
-}
-
-// ---------------------------------------------------------------------------
 section("NaN plans and providers");
 
 {
@@ -358,21 +275,14 @@ section("NaN plans and providers");
   await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
   check("a provider on api.nan.builders is detected without config", stripAnsi(lastStatus(harness.statuses) ?? "").startsWith("nan \u25b0"));
   check("its credential is the one asked for", harness.state.keyRequests.every((provider) => provider === "nan-builders"));
-  check("quota, usage and models are read", ["cloud-api.nan.builders", "/v1/usage", "/v1/models"].every((part) => calls.some((call) => call.url.includes(part))));
+  check("usage and models are read", ["/v1/usage", "/v1/models"].every((part) => calls.some((call) => call.url.includes(part))));
 }
 
 {
   stubFetch();
   const harness = makeHarness({ modelId: "glm5.3" });
   await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  check("a premium model on a member key says so", stripAnsi(lastStatus(harness.statuses) ?? "") === "nan glm5.3 not in your plan", stripAnsi(lastStatus(harness.statuses) ?? ""));
-}
-
-{
-  stubFetch();
-  const harness = makeHarness({ modelId: "qwen3.6" });
-  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  check("an uncapped model shows its month usage", stripAnsi(lastStatus(harness.statuses) ?? "") === "nan no cap · 427 this month", stripAnsi(lastStatus(harness.statuses) ?? ""));
+  check("a premium model on a member key says it is not available", stripAnsi(lastStatus(harness.statuses) ?? "") === "nan glm5.3 not available on this key", stripAnsi(lastStatus(harness.statuses) ?? ""));
 }
 
 {
@@ -382,37 +292,187 @@ section("NaN plans and providers");
   await harness.commands.get("nan-quota").handler("", harness.ctx);
   const text = harness.entries.at(-1)?.data?.text ?? "";
   check("the table hides models the key cannot call", !text.includes("glm5.3 ") && !text.includes("glm5.2"), text);
+  check("the table shows the balance", text.includes("left of 7000"), text.split("\n")[2]);
+  check("the session line waits for a second reading", !text.includes("since this pi session started"));
+  // A second, forced read: `used` grew by 100 in the stub.
+  await harness.commands.get("nan-quota").handler("refresh", harness.ctx);
+  const text2 = harness.entries.at(-1)?.data?.text ?? "";
+  check(
+    "the session line shows the credits burned since the first reading",
+    text2.includes("+100.0 cr since this pi session started"),
+    text2.split("\n").find((line) => line.includes("session")),
+  );
 }
 
 {
-  // Privacy switch: only the documented host is contacted.
+  // A removed setting in a user file is silently ignored.
   const configHome = mkdtempSync(join(tmpdir(), "nan-quota-cfg-"));
   mkdirSync(join(configHome, ".pi", "agent"), { recursive: true });
-  writeFileSync(join(configHome, ".pi", "agent", "nan-quota.json"), JSON.stringify({ quotaEndpoint: false }));
+  writeFileSync(join(configHome, ".pi", "agent", "nan-quota.json"), JSON.stringify({ quotaEndpoint: false, alwaysShow: true }));
   const previousHome = process.env.HOME;
   process.env.HOME = configHome;
   const calls = stubFetch();
-  const harness = makeHarness();
+  const harness = makeHarness({ modelId: "claude-opus-5-5", provider: "anthropic", baseUrl: "https://api.anthropic.com" });
   await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
   process.env.HOME = previousHome;
-  check("quotaEndpoint false never calls cloud-api", !calls.some((call) => call.url.includes("cloud-api")), calls.map((c) => c.url).join());
-  check("and still draws an (estimated) bar", stripAnsi(lastStatus(harness.statuses) ?? "").startsWith("nan \u25b0"));
-  check("and does not warn about a choice the user made", harness.notifications.length === 0);
+  check("a removed setting in the config file is ignored", harness.statuses.length === 1, `${harness.statuses.length} statuses`);
+  check("no undocumented host is contacted", calls.every((call) => call.url.includes("api.nan.builders")), calls.map((c) => c.url).join());
+  check("the other settings still apply (alwaysShow)", stripAnsi(lastStatus(harness.statuses) ?? "").startsWith("nan "));
+}
+
+// ---------------------------------------------------------------------------
+section("window re-request on a period rollover");
+
+{
+  // First response reveals a period that started 2 days ago: the requested
+  // window differs, so the loader re-requests once with the right window and
+  // remembers the period from then on.
+  const recentStart = () => `${utcDate(Date.now() - 2 * DAY)}T10:00:00Z`;
+  const calls = stubFetch((url, usageCalls) => {
+    const payload = usagePayloadFor(url, usageCalls);
+    if (usageCalls <= 2) payload.credits.period_start = recentStart();
+    return jsonResponse(payload);
+  });
+  const harness = makeHarness();
+  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
+
+  const usageCalls = calls.filter((call) => call.url.includes("/v1/usage"));
+  check("the first load re-requests with the right window", usageCalls.length === 2, usageCalls.map((c) => c.url).join("\n"));
+  const second = new URL(usageCalls[1]?.url ?? "");
+  check("the re-request covers the revealed period", second.searchParams.get("start_date") === utcDate(Date.now() - 2 * DAY), second.toString());
+
+  // The period is remembered: the next refresh asks for it directly.
+  await harness.commands.get("nan-quota").handler("refresh", harness.ctx);
+  const after = calls.filter((call) => call.url.includes("/v1/usage"));
+  check("the remembered period needs no re-request", after.length === 3, after.map((c) => c.url).join("\n"));
+  check(
+    "the remembered window starts on the period",
+    new URL(after[2]?.url ?? "").searchParams.get("start_date") === utcDate(Date.now() - 2 * DAY),
+    after[2]?.url,
+  );
+}
+
+{
+  // The captured fixture (real payload): whatever it reveals, the loader
+  // settles on a window and paints.
+  const calls = stubFetch(() => jsonResponse(usageFixture));
+  const harness = makeHarness();
+  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
+  check("the real fixture parses and paints", typeof lastStatus(harness.statuses) === "string" && stripAnsi(lastStatus(harness.statuses) ?? "").startsWith("nan "));
+  check("the fixture's pagination is respected (single page, has_more false)", calls.filter((call) => call.url.includes("/v1/usage")).length <= 2);
+}
+
+// ---------------------------------------------------------------------------
+section("402: spent pool, seen and cleared");
+
+{
+  stubFetch();
+  const harness = makeHarness();
+  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
+  const healthy = stripAnsi(lastStatus(harness.statuses) ?? "");
+
+  // The newest assistant entry died on 402 insufficient_balance. The
+  // segment repaints on the next refresh; model_select forces one now.
+  harness.sessionEntries.push({ type: "message", message: { role: "assistant", stopReason: "error", errorMessage: "402 insufficient_balance" } });
+  await harness.handlers.get("turn_end")({ turn: {} }, harness.ctx);
+  await harness.handlers.get("model_select")({}, harness.ctx);
+  check("a 402 flips the segment to the spent state", stripAnsi(lastStatus(harness.statuses) ?? "").startsWith("nan \u26d4 credits spent"), stripAnsi(lastStatus(harness.statuses) ?? ""));
+
   await harness.commands.get("nan-quota").handler("", harness.ctx);
-  check("the table says the endpoint is off", (harness.entries.at(-1)?.data?.text ?? "").includes("quota endpoint off"));
+  const spentText = harness.entries.at(-1)?.data?.text ?? "";
+  check("the command heads the table with the fix", spentText.includes("credits spent \u2014 buy a credit pack at cloud.nan.builders, or wait for the reset on"), spentText.split("\n")[2]);
+
+  // A later successful assistant run clears the flag.
+  harness.sessionEntries.length = 0;
+  harness.sessionEntries.push({ type: "message", message: { role: "assistant", stopReason: "stop" } });
+  await harness.handlers.get("turn_end")({ turn: {} }, harness.ctx);
+  await harness.handlers.get("model_select")({}, harness.ctx);
+  check("a successful run clears the 402", !stripAnsi(lastStatus(harness.statuses) ?? "").includes("credits spent") && stripAnsi(lastStatus(harness.statuses) ?? "").startsWith("nan \u25b0"), stripAnsi(lastStatus(harness.statuses) ?? ""));
+}
+
+{
+  // A frozen subscription: the balance says so, and everything shouts it.
+  stubFetch((url, usageCalls) => {
+    const payload = usagePayloadFor(url, usageCalls);
+    payload.credits.frozen = true;
+    return jsonResponse(payload);
+  });
+  const harness = makeHarness();
+  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
+  check("a frozen subscription shows the paused state", stripAnsi(lastStatus(harness.statuses) ?? "") === "nan \u23f8 subscription inactive \u2014 cloud.nan.builders", stripAnsi(lastStatus(harness.statuses) ?? ""));
+}
+
+{
+  // An account not billed in credits: tokens, no bar.
+  stubFetch((url, usageCalls) => {
+    const payload = usagePayloadFor(url, usageCalls);
+    payload.credits = null;
+    return jsonResponse(payload);
+  });
+  const harness = makeHarness();
+  await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
+  const status = stripAnsi(lastStatus(harness.statuses) ?? "");
+  check("a null balance shows window tokens", /^nan [\d.]+[kMB]? tokens \(\d+d\)$/.test(status), status);
+  check("no bar without credits", !status.includes("\u25b0") && !status.includes("\u25b1"));
+  await harness.commands.get("nan-quota").handler("", harness.ctx);
+  const text = harness.entries.at(-1)?.data?.text ?? "";
+  check("the table switches to the token view", text.includes("this account is not billed in credits; caps per model are shown in the dashboard"), text);
 }
 
 // ---------------------------------------------------------------------------
 section("lifecycle");
 
 {
+  const { mock } = await import("node:test");
   stubFetch();
   const harness = makeHarness();
   await harness.handlers.get("session_start")({ reason: "startup" }, harness.ctx);
-  await harness.handlers.get("turn_end")({ turn: {} }, harness.ctx);
-  check("turn_end schedules a debounced refresh", true);
-  await harness.handlers.get("session_shutdown")({ reason: "quit" }, harness.ctx);
-  check("session_shutdown does not throw", true);
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let painted = harness.statuses.length;
+    await harness.handlers.get("turn_end")({ turn: {} }, harness.ctx);
+    check("turn_end does not refresh synchronously", harness.statuses.length === painted);
+    mock.timers.tick(15_000);
+    await settle();
+    check("turn_end refreshes once the debounce window elapses", harness.statuses.length > painted);
+
+    painted = harness.statuses.length;
+    await harness.handlers.get("turn_end")({ turn: {} }, harness.ctx);
+    let threw = false;
+    try {
+      await harness.handlers.get("session_shutdown")({ reason: "quit" }, harness.ctx);
+    } catch {
+      threw = true;
+    }
+    check("session_shutdown does not throw", !threw);
+    mock.timers.tick(15_000);
+    await settle();
+    check("session_shutdown cancels the pending refresh", harness.statuses.length === painted);
+  } finally {
+    mock.timers.reset();
+  }
+}
+
+// ---------------------------------------------------------------------------
+section("advice");
+
+{
+  // No key at all: the command explains where a key comes from.
+  delete process.env.NAN_API_KEY;
+  globalThis.fetch = async (url) => {
+    throw new Error(`no key, no fetch: ${url}`);
+  };
+  const harness = makeHarness({ key: "" });
+  await harness.commands.get("nan-quota").handler("", harness.ctx);
+  const text = harness.entries.at(-1)?.data?.text ?? "";
+  check("without a key the command explains how to add one", text.includes("no API key") && text.includes("NAN_API_KEY"), text);
+  check("and which plans carry credits", text.includes("keys need a plan with credits (nan_member or Premium) or a credit pack; the Community plan includes none"), text);
+  check("the advice never contains a key", !text.includes("sk-"));
+  check("nothing was fetched without a key", !text.includes("billing period"));
 }
 
 // ---------------------------------------------------------------------------

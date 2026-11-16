@@ -1,41 +1,48 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /**
- * pi-nan-quota — NaN Builders quota in the pi footer.
+ * pi-nan-quota — NaN Builders credits in the pi footer.
  *
  * Read-only by design: it never registers a provider, never writes
- * configuration and never touches `auth.json`. On each refresh it reads, in
- * parallel,
+ * configuration and never touches `auth.json`. On each refresh it reads
  *
- *  - the quota endpoint (caps, reset, extra pools; undocumented, can be off),
- *  - the documented usage report (month consumption, all-time totals),
- *  - the documented model list (what this key can call; cached for an hour),
+ *  - the documented usage report (`/v1/usage`): the account's credit balance
+ *    for the billing period (one shared pool, drawn at each model's price per
+ *    token) plus per-model consumption over the window — the primary data,
+ *  - the documented model list (`/v1/models`, cached hourly): what this key
+ *    can call, which filters the table.
  *
- * keeps the last good answer in memory, and paints one status line:
+ * One usage request per refresh. The window requested is the billing period
+ * when its start is known and remembered from the previous read; on the first
+ * load, or right after a period rollover, the response reveals a period whose
+ * window differs from the one asked for, and the loader re-requests once
+ * with the right window (the only case that costs a second request).
  *
- *     nan ▰▰▰▰▰▰▱▱▱▱  62% 4d3h · glm5.3-flash 91%
+ * It paints one status line:
  *
- * `/nan-quota` prints the per-model table in the transcript as a custom entry,
- * which pi keeps out of the model's context.
+ *     nan ▰▰▰▰▰▱▱▱▱▱ 3745 cr · ⚠ ~8d · resets 15d23h
  *
- * Silences: nothing is requested and nothing is drawn while the active model is
- * not a NaN one (unless `alwaysShow`), and the renderer never waits for the
+ * a fuel gauge of the shared pool (full at the period start). `/nan-quota`
+ * prints the balance, the pace and the per-model table in the transcript as a
+ * custom entry, which pi keeps out of the model's context.
+ *
+ * Silences: nothing is requested and nothing is drawn while the active model
+ * is not a NaN one (unless `alwaysShow`), and the renderer never waits for the
  * network.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { fetchServedModels, SERVED_TTL_MS } from "./api/models.ts";
-import { fetchQuota, type ParsedQuota } from "./api/quota.ts";
-import { fetchUsage, utcDate } from "./api/usage.ts";
+import { fetchUsage, usageWindow } from "./api/usage.ts";
 import { resolveApiKey } from "./auth.ts";
-import { CAPS, CAPS_AS_OF, labelFor } from "./caps.ts";
 import { Debouncer, MODEL_SELECT_MAX_AGE_MS, QuotaCache, TURN_DEBOUNCE_MS } from "./cache.ts";
 import { describeFailure, HELP_TEXT, renderQuotaReport } from "./command.ts";
 import { loadConfig, type NanQuotaConfig } from "./config.ts";
-import { canonicalModelId, filterServed, isNanModel, pickNanProvider, type ModelLike } from "./models.ts";
+import { canonicalModelId, filterServedIds, isNanModel, pickNanProvider, type ModelLike } from "./models.ts";
+import { projectPace } from "./pace.ts";
 import { detectColorMode, paintBars } from "./render/color.ts";
-import { renderStatus, STATUS_KEY, type StatusRenderOptions } from "./render/status.ts";
-import { FetchError, toFetchError, type ModelQuota, type Snapshot, type UsageReport } from "./types.ts";
+import { renderStatus, snapshotClearsCreditRunOut, STATUS_KEY, type StatusRenderOptions } from "./render/status.ts";
+import { FetchError, type CreditBalance, type ModelTotals, type Snapshot, type UsageReport } from "./types.ts";
 
 /** Custom entry used to print the table without sending it to the model. */
 export const ENTRY_TYPE = "nan-quota";
@@ -46,14 +53,55 @@ export const MIN_PI_VERSION = "1.3.0";
 /** Extension API the extension cannot work without. */
 const REQUIRED_API = ["on", "registerCommand", "registerEntryRenderer", "appendEntry"] as const;
 
-type Settled<T> = { ok: true; value: T } | { ok: false; error: FetchError };
+/** The assistant-error text that says the credit pool ran out. */
+const CREDIT_EXHAUSTED = /insufficient_balance|\b402\b/;
 
-async function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
-  try {
-    return { ok: true, value: await promise };
-  } catch (error) {
-    return { ok: false, error: toFetchError(error) };
+/** The billing period revealed by the last successful read. */
+interface RememberedPeriod {
+  /** `YYYY-MM-DD` of `credits.period_start`. */
+  startDay: string;
+  /** Epoch ms of `credits.period_end`; the period is forgotten once passed. */
+  endMs: number;
+}
+
+/** First credit reading of this pi session (the baseline of the session line). */
+export interface SessionBaseline {
+  /** `fetchedAt` of the reading this baseline comes from. */
+  fetchedAt: number;
+  periodStart: string;
+  used: number;
+  packCredits: number;
+}
+
+/** One credit reading: the snapshot fields the session line looks at. */
+export interface SessionReading {
+  fetchedAt: number;
+  credits: CreditBalance;
+}
+
+/**
+ * Pure core of the `/nan-quota` session line: credits burned since the
+ * session's first reading. The first reading, a repeated (cached) reading
+ * and the first reading after a period rollover only establish the baseline
+ * (no delta yet); pack credits spent count as burned too, and the delta
+ * never reads negative.
+ */
+export function sessionCreditDelta(
+  baseline: SessionBaseline | undefined,
+  reading: SessionReading,
+): { baseline: SessionBaseline; delta: number | undefined } {
+  const credits = reading.credits;
+  const fresh: SessionBaseline = {
+    fetchedAt: reading.fetchedAt,
+    periodStart: credits.periodStart,
+    used: credits.used,
+    packCredits: credits.packCredits,
+  };
+  if (baseline === undefined || baseline.fetchedAt === reading.fetchedAt || baseline.periodStart !== credits.periodStart) {
+    return { baseline: fresh, delta: undefined };
   }
+  const delta = credits.used - baseline.used + (baseline.packCredits - credits.packCredits);
+  return { baseline, delta: Math.max(0, delta) };
 }
 
 export default function piNanQuota(pi: ExtensionAPI): void {
@@ -73,8 +121,11 @@ export default function piNanQuota(pi: ExtensionAPI): void {
 
   let config: NanQuotaConfig = loadConfig();
   let context: ExtensionContext | undefined;
-  let warnedEstimate = false;
   let served: { ids: string[]; at: number } | undefined;
+  let creditRunOutAt: number | undefined;
+  let rememberedPeriod: RememberedPeriod | undefined;
+  let sessionBaseline: SessionBaseline | undefined;
+  let sessionCredits: number | undefined;
   /**
    * Last model pi told us about.
    *
@@ -97,7 +148,7 @@ export default function piNanQuota(pi: ExtensionAPI): void {
     }
   }
 
-  /** Provider whose credential reads the quota (see `pickNanProvider`). */
+  /** Provider whose credential reads the data (see `pickNanProvider`). */
   function keyProvider(): string {
     return pickNanProvider(lastModel, allModels(), config.providerId);
   }
@@ -120,47 +171,44 @@ export default function piNanQuota(pi: ExtensionAPI): void {
   }
 
   /**
-   * One read. The quota endpoint is primary; when it fails for any reason other
-   * than a rejected key — or the user turned it off — the documented usage
-   * report and the dated caps table take over, marked as estimates.
+   * One read: the usage report for the right window, plus the served list.
+   * The window is the remembered billing period; when the response reveals a
+   * different one (first load, or a rollover), it is re-requested once with
+   * the right window before the snapshot is built.
    */
   async function loadSnapshot(): Promise<Snapshot> {
-    const at = Date.now();
     const provider = keyProvider();
     const key = await resolveApiKey(context?.modelRegistry, provider);
     if (!key) throw new FetchError("auth", `no API key for provider "${provider}"`);
 
-    const [quota, usage, ids] = await Promise.all([
-      config.quotaEndpoint ? settle(fetchQuota(key)) : Promise.resolve(undefined),
-      settle(fetchUsage(key)),
-      servedModels(key),
-    ]);
-    const usageReport = usage.ok ? usage.value : undefined;
+    const now = Date.now();
+    const known =
+      rememberedPeriod !== undefined && now < rememberedPeriod.endMs ? rememberedPeriod.startDay : undefined;
+    const requested = usageWindow(now, known);
+    let report = await fetchUsage(key, requested, { now: () => now });
 
-    if (quota?.ok) {
-      warnedEstimate = false;
-      return applyModelFilter(snapshotFromQuota(quota.value, at, { usage: usageReport, served: ids }), config);
-    }
-    if (quota && !quota.ok && quota.error.kind === "auth") throw quota.error;
-    if (!usage.ok) throw quota && !quota.ok ? quota.error : usage.error;
-
-    if (quota && !quota.ok && !warnedEstimate) {
-      warnedEstimate = true;
-      if (context?.hasUI) {
-        context.ui.notify(
-          `nan-quota: the quota endpoint failed (${quota.error.message}); showing estimates from /v1/usage and the ${CAPS_AS_OF} caps`,
-          "warning",
-        );
+    const credits = report.credits;
+    if (credits !== null) {
+      const endMs = Date.parse(credits.periodEnd);
+      if (Number.isNaN(endMs) || now >= endMs) {
+        // The period ended (or its bounds are unreadable): forget it, so the
+        // next read asks for the wide window and re-learns the new period.
+        rememberedPeriod = undefined;
+      } else {
+        rememberedPeriod = { startDay: credits.periodStart.slice(0, 10), endMs };
+        const right = usageWindow(now, rememberedPeriod.startDay);
+        if (right.startDate !== requested.startDate || right.endDate !== requested.endDate) {
+          report = await fetchUsage(key, right, { now: () => now });
+        }
       }
     }
-    const snapshot = snapshotFromUsage(usage.value, at, { served: ids });
-    if (!config.quotaEndpoint) snapshot.quotaEndpointDisabled = true;
-    return applyModelFilter(snapshot, config);
+
+    const ids = await servedModels(key);
+    return applyModelFilter(snapshotFromUsage(report, now, { served: ids }), config);
   }
 
   const cache = new QuotaCache({
     fetchSnapshot: loadSnapshot,
-    ttlMs: () => config.refreshSeconds * 1000,
     notify: (failure, level) => {
       if (context?.hasUI) context.ui.notify(`nan-quota: ${describeFailure(failure, keyProvider())}`, level);
     },
@@ -184,6 +232,19 @@ export default function piNanQuota(pi: ExtensionAPI): void {
     } catch {
       snapshot = cache.getSnapshot();
     }
+    if (snapshot !== undefined) {
+      const credits = snapshot.credits;
+      if (credits !== null && credits !== undefined) {
+        const result = sessionCreditDelta(sessionBaseline, { fetchedAt: snapshot.fetchedAt, credits });
+        sessionBaseline = result.baseline;
+        sessionCredits = result.delta;
+      }
+      // A fresh snapshot older than a minute past the 402, showing fuel
+      // again, clears the spent state (the balance lags spending briefly).
+      if (creditRunOutAt !== undefined && snapshotClearsCreditRunOut(creditRunOutAt, snapshot)) {
+        creditRunOutAt = undefined;
+      }
+    }
     pushStatus(ctx);
     return snapshot;
   }
@@ -198,6 +259,28 @@ export default function piNanQuota(pi: ExtensionAPI): void {
     lastModel = model;
   }
 
+  /**
+   * Scan the newest assistant entry for a spent credit pool. NaN answers a
+   * spent pool with `402 insufficient_balance`; a later assistant entry that
+   * ended without an error clears the flag again.
+   */
+  function scanForCreditExhaustion(ctx: ExtensionContext): void {
+    try {
+      for (const entry of [...ctx.sessionManager.getEntries()].reverse()) {
+        if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+        const message = entry.message as { stopReason?: string; errorMessage?: string };
+        if (message.stopReason === "error") {
+          if (CREDIT_EXHAUSTED.test(message.errorMessage ?? "")) creditRunOutAt = Date.now();
+          return; // Only the newest assistant entry matters.
+        }
+        creditRunOutAt = undefined; // A successful run means the pool answers.
+        return;
+      }
+    } catch {
+      // Session introspection is best-effort; never break the turn.
+    }
+  }
+
   /** Repaint the footer segment from whatever the cache currently holds. */
   function pushStatus(ctx: ExtensionContext): void {
     rememberModel(ctx);
@@ -208,13 +291,11 @@ export default function piNanQuota(pi: ExtensionAPI): void {
       theme: ctx.ui.theme,
       show: shouldShow(),
       activeModelId: isNanModel(lastModel, config.providerId) ? lastModel?.id : undefined,
-      warnAt: config.warnAt,
-      criticalAt: config.criticalAt,
-      maxAlerts: config.maxAlerts,
       glyphStyle: process.env.PI_NAN_QUOTA_GLYPHS === "safe" ? "safe" : config.glyphs,
       failed: state.lastError !== undefined,
     };
     if (state.lastGoodAt !== undefined) options.lastGoodAt = state.lastGoodAt;
+    if (creditRunOutAt !== undefined) options.creditRunOutAt = creditRunOutAt;
     try {
       ctx.ui.setStatus(STATUS_KEY, renderStatus(state.snapshot, options));
     } catch {
@@ -227,8 +308,11 @@ export default function piNanQuota(pi: ExtensionAPI): void {
     rememberModel(ctx);
     // The config file is re-read here so `/reload` picks edits up.
     config = loadConfig();
-    warnedEstimate = false;
     served = undefined;
+    creditRunOutAt = undefined;
+    // The session line counts from this session's first reading.
+    sessionBaseline = undefined;
+    sessionCredits = undefined;
     if (shouldShow()) await refresh(ctx, { force: true });
     else pushStatus(ctx);
   });
@@ -243,6 +327,7 @@ export default function piNanQuota(pi: ExtensionAPI): void {
   pi.on("turn_end", async (_event, ctx) => {
     context = ctx;
     rememberModel(ctx);
+    scanForCreditExhaustion(ctx);
     if (shouldShow()) debouncer.trigger();
   });
 
@@ -256,7 +341,7 @@ export default function piNanQuota(pi: ExtensionAPI): void {
   );
 
   pi.registerCommand("nan-quota", {
-    description: "Show NaN Builders quota per model (refresh | help)",
+    description: "Show NaN Builders credits and per-model consumption (refresh | help)",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       context = ctx;
       rememberModel(ctx);
@@ -269,111 +354,68 @@ export default function piNanQuota(pi: ExtensionAPI): void {
       const error = cache.getState().lastError;
       const input: Parameters<typeof renderQuotaReport>[0] = {
         now: Date.now(),
-        capsAsOf: CAPS_AS_OF,
         provider: keyProvider(),
       };
       if (snapshot !== undefined) input.snapshot = snapshot;
-      if (snapshot?.usage !== undefined) input.usage = snapshot.usage;
       if (error !== undefined) input.error = error;
+      if (creditRunOutAt !== undefined) input.creditRunOutAt = creditRunOutAt;
+      if (sessionCredits !== undefined) input.sessionCredits = sessionCredits;
       pi.appendEntry<{ text: string }>(ENTRY_TYPE, { text: renderQuotaReport(input) });
     },
   });
 }
 
 export interface SnapshotExtras {
-  usage?: UsageReport | undefined;
   served?: string[] | undefined;
 }
 
-/** Build a snapshot from the quota endpoint payload. */
-export function snapshotFromQuota(parsed: ParsedQuota, at: number, extras: SnapshotExtras = {}): Snapshot {
-  const models = filterServed(parsed.models, extras.served);
+/**
+ * Build a snapshot: the credit balance and the pace (account-wide), plus
+ * per-model totals over the window, restricted to what the key can call.
+ */
+export function snapshotFromUsage(usage: UsageReport, at: number, extras: SnapshotExtras = {}): Snapshot {
+  const served = filterServedIds(Object.keys(usage.byModel), extras.served);
+  const byModel: Record<string, ModelTotals> = {};
+  let totalTokens = 0;
+  let totalCredits = 0;
+  for (const model of served) {
+    const totals = usage.byModel[model];
+    if (totals === undefined) continue;
+    // Copy: the filter below must never mutate the caller's report.
+    byModel[model] = { ...totals };
+    totalTokens += totals.tokens;
+    totalCredits += totals.credits;
+  }
   const snapshot: Snapshot = {
-    source: "quota",
-    estimated: false,
     fetchedAt: at,
-    models,
+    window: { startDate: usage.startDate, endDate: usage.endDate },
+    credits: usage.credits === null ? null : { ...usage.credits },
+    byModel,
+    totalTokens,
+    totalCredits,
+    daily: usage.daily.map((day) => ({ ...day })),
   };
-  if (parsed.periodStart !== undefined) snapshot.periodStart = parsed.periodStart;
-  if (parsed.updatedAt !== undefined) snapshot.updatedAt = parsed.updatedAt;
-  const periodEnd = pickPeriodEnd(models);
-  if (periodEnd !== undefined) snapshot.periodEnd = periodEnd;
-  if (extras.usage !== undefined) snapshot.usage = extras.usage;
-  if (extras.served !== undefined) snapshot.served = extras.served;
+  const pace = projectPace(usage, at);
+  if (pace !== undefined) snapshot.pace = pace;
+  if (extras.served !== undefined) snapshot.served = [...extras.served];
+  if (usage.allTimeTokens !== undefined) snapshot.allTimeTokens = usage.allTimeTokens;
   return snapshot;
 }
 
 /**
- * Build an estimated snapshot from `/v1/usage`: monthly consumption from the
- * server, caps from the dated docs table, restricted to what the key can call.
+ * Restrict the table to `config.models` when the user set a list. The balance,
+ * the pace and the daily totals stay account-wide: the pool is shared.
  */
-export function snapshotFromUsage(usage: UsageReport, at: number, extras: SnapshotExtras = {}): Snapshot {
-  const periodStart = `${utcDate(at).slice(0, 7)}-01`;
-  const periodEnd = nextMonthStartIso(at);
-  const models: ModelQuota[] = CAPS.map((entry) => {
-    const tokensUsed = usage.byModel[entry.model] ?? 0;
-    const model: ModelQuota = {
-      model: entry.model,
-      label: labelFor(entry.model),
-      cap: entry.cap,
-      tokensUsed,
-      remaining: Math.max(0, entry.cap - tokensUsed),
-      periodStart,
-      periodEnd,
-    };
-    if (entry.windowHours !== undefined) model.windowHours = entry.windowHours;
-    if (entry.fullWindowTokens !== undefined) model.fullWindowTokens = entry.fullWindowTokens;
-    return model;
-  });
-  const snapshot: Snapshot = {
-    source: "usage",
-    estimated: true,
-    periodStart,
-    periodEnd,
-    fetchedAt: at,
-    models: filterServed(models, extras.served),
-    usage,
-  };
-  if (extras.served !== undefined) snapshot.served = extras.served;
-  return snapshot;
-}
-
-/** Restrict the snapshot to `config.models` when the user set a list. */
 export function applyModelFilter(snapshot: Snapshot, config: NanQuotaConfig): Snapshot {
   if (config.models.length === 0) return snapshot;
   const allowed = new Set(config.models.map((model) => canonicalModelId(model)));
-  const models = snapshot.models.filter((model) => allowed.has(canonicalModelId(model.model)));
-  if (models.length === 0) return snapshot;
-  return { ...snapshot, models };
-}
-
-/**
- * Most common reset among the models on screen.
- *
- * The captured payload reports `2026-12-01` for the four monthly models and
- * `2026-12-02` for the windowed glm; the shared date is the one the header
- * should show.
- */
-function pickPeriodEnd(models: readonly ModelQuota[]): string | undefined {
-  const counts = new Map<string, number>();
-  for (const model of models) {
-    if (!model.periodEnd) continue;
-    counts.set(model.periodEnd, (counts.get(model.periodEnd) ?? 0) + 1);
-  }
-  let best: string | undefined;
-  let bestCount = 0;
-  for (const [periodEnd, count] of counts) {
-    if (count > bestCount) {
-      best = periodEnd;
-      bestCount = count;
-    }
-  }
-  return best;
-}
-
-/** `2026-12-01T00:00:00Z` for a timestamp inside November. */
-function nextMonthStartIso(at: number): string {
-  const date = new Date(at);
-  const end = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1, 0, 0, 0);
-  return new Date(end).toISOString().replace(".000Z", "Z");
+  const byModel = Object.fromEntries(
+    Object.entries(snapshot.byModel).filter(([model]) => allowed.has(canonicalModelId(model))),
+  );
+  return {
+    ...snapshot,
+    byModel,
+    totalTokens: Object.values(byModel).reduce((total, row) => total + row.tokens, 0),
+    totalCredits: Object.values(byModel).reduce((total, row) => total + row.credits, 0),
+  };
 }

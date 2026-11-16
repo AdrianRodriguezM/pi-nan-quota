@@ -2,29 +2,35 @@
 /**
  * `/nan-quota`.
  *
- * `renderQuotaReport()` is pure: it turns a snapshot plus an optional usage
- * report into the text the command appends to the transcript. Keeping it out of
- * the handler is what makes the table testable against the captured fixtures.
+ * `renderQuotaReport()` is pure: it turns a snapshot into the text the command
+ * appends to the transcript. Keeping it out of the handler is what makes the
+ * table testable against the captured fixtures.
+ *
+ * The table leads with the account's credit balance (the real budget, from
+ * the documented `/v1/usage`), then breaks it down per model at each model's
+ * price per token. Accounts not billed in credits get the token table only.
  */
 
-import { CAPS, CAPS_AS_OF } from "./caps.ts";
-import { formatPercent, formatResetLong, formatTokens } from "./format.ts";
-import { canonicalModelId } from "./models.ts";
+import { labelFor } from "./caps.ts";
+import { formatCredits, formatResetLong, formatTokens, shortMonthDate } from "./format.ts";
 import { renderBar } from "./render/bar.ts";
-import type { FetchError, ModelQuota, Snapshot, UsageReport } from "./types.ts";
+import type { FetchError, ModelTotals, Snapshot } from "./types.ts";
 
 export const HELP_TEXT = [
-  "/nan-quota          quota table for the current billing period",
+  "/nan-quota          credit balance and per-model consumption",
   "/nan-quota refresh  ignore the cache and read the API now",
   "/nan-quota help     this text",
   "",
-  "Settings: ~/.pi/agent/nan-quota.json (optional) — warnAt, criticalAt, maxAlerts,",
-  "alwaysShow, providerId, glyphs, quotaEndpoint, models, refreshSeconds.",
+  "NaN bills one shared pool of credits per billing period, drawn at each",
+  "model's price per token; the balance comes from the documented /v1/usage.",
+  "",
+  "Settings: ~/.pi/agent/nan-quota.json (optional) — alwaysShow, providerId,",
+  "glyphs, models, refreshSeconds.",
 ].join("\n");
 
 /** Where an API key comes from, for the advice lines. */
 const KEY_ORIGIN =
-  "keys come with a NaN inference plan (member or GLM 5.3 premium); the Community plan has no API access";
+  "keys need a plan with credits (nan_member or Premium) or a credit pack; the Community plan includes none";
 
 /**
  * Word a failure for the user, with the fix when there is one. The key itself
@@ -43,24 +49,44 @@ export function describeFailure(failure: FetchError, provider = "nan"): string {
 
 export interface QuotaCommandInput {
   snapshot?: Snapshot;
-  usage?: UsageReport;
   now: number;
-  /** Date of the fallback caps table, for the estimated footer. */
-  capsAsOf?: string;
   /** Last failed request, shown as advice instead of being swallowed. */
   error?: FetchError;
-  /** Provider whose key reads the quota, for the advice lines. */
+  /** Provider whose key reads the data, for the advice lines. */
   provider?: string;
+  /** Epoch ms when the last assistant run died on a spent credit pool. */
+  creditRunOutAt?: number;
+  /** Credits burned since this pi session started (omitted until two readings exist). */
+  sessionCredits?: number;
 }
 
-interface Row {
-  name: string;
-  bar: string;
-  percent: string;
-  used: string;
-  cap: string;
-  free: string;
-  extra: string;
+/** Sparkline blocks, low to high. */
+const SPARK_LEVELS = ["\u2581", "\u2582", "\u2583", "\u2584", "\u2585", "\u2586", "\u2587", "\u2588"] as const;
+
+/** Days shown in the sparkline row. */
+const SPARK_DAYS = 7;
+
+/** `▂▅▇▇▃▁▇`: scaled to the max of the shown days; all-zero reads flat-low. */
+export function sparkline(values: readonly number[]): string {
+  if (values.length === 0) return "";
+  const max = Math.max(...values);
+  if (max <= 0) return SPARK_LEVELS[0].repeat(values.length);
+  return values
+    .map(
+      (value) =>
+        SPARK_LEVELS[
+          Math.max(0, Math.min(SPARK_LEVELS.length - 1, Math.round((value / max) * (SPARK_LEVELS.length - 1))))
+        ],
+    )
+    .join("");
+}
+
+/** Whole days a window spans, inclusive (`Nov 10 → Nov 16` is 7). */
+function windowDayCount(snapshot: Snapshot): number {
+  const from = Date.parse(`${snapshot.window.startDate}T00:00:00Z`);
+  const to = Date.parse(`${snapshot.window.endDate}T00:00:00Z`);
+  if (Number.isNaN(from) || Number.isNaN(to) || to < from) return 1;
+  return Math.round((to - from) / 86_400_000) + 1;
 }
 
 /** Render the whole command output. Never throws on partial data. */
@@ -77,148 +103,186 @@ export function renderQuotaReport(input: QuotaCommandInput): string {
     return lines.join("\n");
   }
 
-  const estimated = snapshot.estimated || snapshot.source === "usage";
-  const periodStart = snapshot.periodStart ?? "\u2026";
-  const periodEnd = snapshot.periodEnd;
-  const resetAt = periodEnd ? Date.parse(periodEnd) : Number.NaN;
-  const period = `NaN \u00b7 period ${periodStart} \u2192 ${periodEndDay(periodEnd)}`;
-  lines.push(Number.isNaN(resetAt) ? period : `${period} (resets in ${formatResetLong(resetAt - now)})`);
-  lines.push("");
+  const credits = snapshot.credits ?? null;
+  const modelEntries = Object.entries(snapshot.byModel).sort(([aName, a], [bName, b]) => {
+    if (b.credits !== a.credits) return b.credits - a.credits;
+    if (b.tokens !== a.tokens) return b.tokens - a.tokens;
+    return aName.localeCompare(bName);
+  });
+  const noCredits = modelEntries
+    .filter(([model, totals]) => totals.credits <= 0 && totals.tokens > 0)
+    .map(([model]) => model)
+    .sort((a, b) => a.localeCompare(b));
 
-  const capped = snapshot.models.filter((model) => model.cap > 0);
-  const rows = orderModels(capped).map((model) => buildRow(model, estimated));
-  if (rows.length > 0) lines.push(...formatRows(rows));
-  else lines.push("  no capped model on this key");
-
-  const usage = input.usage ?? snapshot.usage;
-  const others = describeOtherModels(snapshot, usage);
-  if (others) {
+  if (credits === null) {
+    // Not billed in credits: tokens are everything the API reports.
+    lines.push(`NaN \u00b7 usage, last ${windowDayCount(snapshot)} days (UTC)`);
     lines.push("");
-    lines.push(others);
+    lines.push(...formatTokenTable(modelEntries));
+    lines.push("");
+    lines.push("this account is not billed in credits; caps per model are shown in the dashboard");
+    lines.push("");
+    lines.push(`source: /v1/usage ${snapshot.window.startDate} \u2192 ${snapshot.window.endDate} (UTC days)`);
+    if (input.error) lines.push(`last error: ${describeFailure(input.error, input.provider)}`);
+    return lines.join("\n");
   }
 
-  const usageLine = describeUsage(usage);
-  if (usageLine) {
+  const periodEndMs = Date.parse(credits.periodEnd);
+  const resetDate = Number.isNaN(periodEndMs) ? credits.periodEnd : shortMonthDate(credits.periodEnd);
+  const fix = `buy a credit pack at cloud.nan.builders, or wait for the reset on ${resetDate}`;
+
+  lines.push(
+    `NaN \u00b7 billing period ${shortMonthDate(credits.periodStart)} \u2192 ${shortMonthDate(credits.periodEnd)} \u00b7 resets in ${formatResetLong(periodEndMs - now)}`,
+  );
+  lines.push("");
+
+  const spent = input.creditRunOutAt !== undefined || credits.remaining + credits.packCredits < 1;
+  if (credits.frozen) {
+    lines.push(`  subscription inactive \u2014 credit requests are refused \u00b7 ${fix}`);
     lines.push("");
-    lines.push(usageLine);
+  } else if (spent) {
+    lines.push(`  credits spent \u2014 ${fix}`);
+    lines.push("");
+  }
+
+  const percent =
+    credits.allowance > 0 ? Math.min(100, Math.max(0, Math.round((credits.remaining / credits.allowance) * 100))) : 0;
+  lines.push(
+    `  credits  ${renderBar(percent)}  ${formatCredits(credits.remaining)} left of ${formatCredits(credits.allowance)} \u00b7 ${formatCredits(credits.used)} used`,
+  );
+  lines.push(
+    credits.packCredits > 0
+      ? `  packs    ${credits.packCredits.toFixed(1)} left \u00b7 expire ${credits.packExpiresAt?.slice(0, 10) ?? "unknown"}`
+      : "  packs    none",
+  );
+
+  const pace = snapshot.pace;
+  if (pace === undefined) {
+    lines.push("  pace     too early in the period to project");
+  } else if (pace.runsOutAt !== undefined && pace.runsOutBeforeReset) {
+    const daysBefore = Math.floor((periodEndMs - pace.runsOutAt) / 86_400_000);
+    lines.push(
+      `  pace     ~${Math.round(pace.creditsPerDay)} cr/day over the last ${pace.basisDays.toFixed(1)} days \u2192 runs out ~${shortMonthDate(new Date(pace.runsOutAt).toISOString())}, ${daysBefore} days before the reset`,
+    );
+  } else {
+    lines.push(
+      `  pace     ~${Math.round(pace.creditsPerDay)} cr/day over the last ${pace.basisDays.toFixed(1)} days \u2192 on pace to last until the reset`,
+    );
+  }
+
+  if (input.sessionCredits !== undefined) {
+    lines.push(`  session  +${input.sessionCredits.toFixed(1)} cr since this pi session started (account-wide, every key)`);
   }
 
   lines.push("");
-  lines.push(describeSource(snapshot, estimated, input.capsAsOf ?? CAPS_AS_OF));
+  lines.push(...formatModelTable(modelEntries, snapshot.totalCredits));
+  if (noCredits.length > 0) lines.push(`  no credits drawn: ${noCredits.join(", ")}`);
+
+  const days = snapshot.daily.slice(-SPARK_DAYS);
+  if (days.length > 0) {
+    lines.push("");
+    // Kept short enough for a 100-column terminal: values only, the span once.
+    const values = days.map((day) => Math.round(day.credits)).join(" ");
+    const span = `${shortMonthDate(days[0]!.date)} \u2192 ${shortMonthDate(days.at(-1)!.date)}, UTC`;
+    lines.push(`  last ${SPARK_DAYS} days  ${sparkline(days.map((day) => day.credits))}  ${values} cr  (${span})`);
+  }
+
+  lines.push("");
+  lines.push(
+    // Rows are whole UTC days while the period starts mid-day, so the first
+    // day can carry the previous period's tail: the balance is the reference.
+    `source: /v1/usage ${snapshot.window.startDate} \u2192 ${snapshot.window.endDate} (whole UTC days) \u00b7 the balance is authoritative`,
+  );
   if (input.error) lines.push(`last error: ${describeFailure(input.error, input.provider)}`);
   return lines.join("\n");
 }
 
-/** Table order follows the docs table; models it does not list go last. */
-function orderModels(models: readonly ModelQuota[]): ModelQuota[] {
-  const rank = new Map(CAPS.map((entry, index) => [entry.model, index]));
-  return [...models].sort((a, b) => {
-    const left = rank.get(canonicalModelId(a.model)) ?? Number.MAX_SAFE_INTEGER;
-    const right = rank.get(canonicalModelId(b.model)) ?? Number.MAX_SAFE_INTEGER;
-    if (left !== right) return left - right;
-    return a.model.localeCompare(b.model);
-  });
+interface TableRow {
+  name: string;
+  credits: string;
+  share: string;
+  crPerMtok: string;
+  cached: string;
+  tokens: string;
+  req: string;
 }
 
-function buildRow(model: ModelQuota, estimated: boolean): Row {
-  const percent = formatPercent(model.tokensUsed, model.cap);
-  return {
-    name: model.model,
-    // From the printed percentage, so the row's bar and number always agree.
-    bar: renderBar(percent),
-    percent: `${estimated ? "~" : ""}${percent}%`,
-    used: formatTokens(model.tokensUsed),
-    cap: formatTokens(model.cap),
-    free: formatTokens(Math.max(0, model.remaining)),
-    extra: [describeExtra(model), describeWindow(model)].filter(Boolean).join("   "),
+/** The credits breakdown table; empty cells drop their column. */
+function formatModelTable(
+  entries: readonly (readonly [string, ModelTotals])[],
+  totalCredits: number,
+): string[] {
+  const rows: TableRow[] = entries
+    .filter(([, totals]) => totals.credits > 0)
+    .map(([model, totals]) => ({
+      name: `${model} (${labelFor(model)})`,
+      // Fixed one decimal so the column aligns on the point (`2.0`, not `2`).
+      credits: totals.credits.toFixed(1),
+      share: totalCredits > 0 ? `${Math.round((totals.credits / totalCredits) * 100)}%` : "0%",
+      // Below 100k tokens the price per million is noise (a handful of
+      // credits over a handful of tokens).
+      crPerMtok: totals.tokens >= 1e5 ? (totals.credits / totals.tokens * 1e6).toFixed(2) : "\u2014",
+      cached: totals.promptTokens > 0 ? `${Math.round((totals.cachedTokens / totals.promptTokens) * 100)}%` : "\u2014",
+      tokens: formatTokens(totals.tokens),
+      req: formatTokens(totals.requests),
+    }));
+  if (rows.length === 0) return ["  no credits drawn in the window"];
+
+  const header: TableRow = {
+    name: "model",
+    credits: "credits",
+    share: "share",
+    crPerMtok: "cr/Mtok",
+    cached: "cached",
+    tokens: "tokens",
+    req: "req",
   };
+  return padTable([header, ...rows]);
 }
 
-/** `+125M extra until 2027-04-29`, or why the pool cannot be used. */
-function describeExtra(model: ModelQuota): string {
-  if (!model.extraTokens || model.extraTokens <= 0) return "";
-  const amount = `+${formatTokens(model.extraTokens)} extra`;
-  if (model.extraUsable === false) return `${amount} (paused: needs an active membership)`;
-  const expiry = model.extraExpiresAt?.slice(0, 10);
-  return expiry ? `${amount} until ${expiry}` : amount;
+/** The tokens-only table for accounts not billed in credits. */
+function formatTokenTable(entries: readonly (readonly [string, ModelTotals])[]): string[] {
+  const empty = { credits: "", share: "", crPerMtok: "" };
+  const rows: TableRow[] = entries.map(([model, totals]) => ({
+    name: `${model} (${labelFor(model)})`,
+    ...empty,
+    cached: totals.promptTokens > 0 ? `${Math.round((totals.cachedTokens / totals.promptTokens) * 100)}%` : "\u2014",
+    tokens: formatTokens(totals.tokens),
+    req: formatTokens(totals.requests),
+  }));
+  if (rows.length === 0) return ["  no token consumption in the window"];
+
+  const header: TableRow = {
+    name: "model",
+    ...empty,
+    cached: "cached",
+    tokens: "tokens",
+    req: "req",
+  };
+  return padTable([header, ...rows]);
 }
 
-/** `4h window: 400M`, plus its use when the server reports it. */
-function describeWindow(model: ModelQuota): string {
-  if (!model.windowHours || !model.fullWindowTokens) return "";
-  const size = `${model.windowHours}h window: ${formatTokens(model.fullWindowTokens)}`;
-  if (model.windowTokensUsed === undefined) return size;
-  return `${size} (${formatPercent(model.windowTokensUsed, model.fullWindowTokens)}% used)`;
-}
-
-/** Align the numeric columns so the table can be read vertically. */
-function formatRows(rows: readonly Row[]): string[] {
-  const width = (values: readonly string[]) => values.reduce((max, value) => Math.max(max, value.length), 0);
-  const nameWidth = width(rows.map((row) => row.name));
-  const percentWidth = width(rows.map((row) => row.percent));
-  const usedWidth = width(rows.map((row) => row.used));
-  const capWidth = width(rows.map((row) => row.cap));
-  const freeWidth = width(rows.map((row) => row.free));
+/** Align the columns so the table can be read vertically. */
+function padTable(rows: readonly TableRow[]): string[] {
+  const width = (pick: (row: TableRow) => string) => rows.reduce((max, row) => Math.max(max, pick(row).length), 0);
+  const nameW = width((row) => row.name);
+  const creditsW = width((row) => row.credits);
+  const shareW = width((row) => row.share);
+  const crW = width((row) => row.crPerMtok);
+  const cachedW = width((row) => row.cached);
+  const tokensW = width((row) => row.tokens);
+  const reqW = width((row) => row.req);
 
   return rows.map((row) => {
-    const head = `  ${row.name.padEnd(nameWidth)}  ${row.bar}  ${row.percent.padStart(percentWidth)}`;
-    const usage = `${row.used.padStart(usedWidth)} / ${row.cap.padEnd(capWidth)}`;
-    const rest = `  ${row.free.padStart(freeWidth)} free`;
-    const extra = row.extra ? `   ${row.extra}` : "";
-    return `${head}   ${usage}${rest}${extra}`.trimEnd();
+    const cells = [
+      row.name.padEnd(nameW),
+      row.credits.padStart(creditsW),
+      row.share.padStart(shareW),
+      row.crPerMtok.padStart(crW),
+      row.cached.padStart(cachedW),
+      row.tokens.padStart(tokensW),
+      row.req.padStart(reqW),
+    ];
+    return `  ${cells.filter((cell) => cell !== "").join("  ")}`.trimEnd();
   });
-}
-
-/**
- * `other models this month: qwen3.6 427 · gemma4 135` — models with traffic
- * and no cap on this key (no quota row, or `cap: 0`). Wording stays neutral:
- * the usage report counts tokens, and some endpoints (images) are limited by
- * requests in pools the quota report does not expose.
- */
-function describeOtherModels(snapshot: Snapshot, usage: UsageReport | undefined): string | undefined {
-  const capped = new Set(snapshot.models.filter((model) => model.cap > 0).map((model) => canonicalModelId(model.model)));
-  const amounts = new Map<string, number>();
-  for (const model of snapshot.models) {
-    if (model.cap <= 0 && model.tokensUsed > 0) amounts.set(canonicalModelId(model.model), model.tokensUsed);
-  }
-  for (const [model, tokens] of Object.entries(usage?.byModel ?? {})) {
-    const id = canonicalModelId(model);
-    if (!capped.has(id) && tokens > 0) amounts.set(id, tokens);
-  }
-  if (amounts.size === 0) return undefined;
-  const parts = [...amounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([model, tokens]) => `${model} ${formatTokens(tokens)}`);
-  return `other models this month: ${parts.join(" \u00b7 ")}`;
-}
-
-/** `2026-12-01T00:00:00Z` -> `2026-12-01`. */
-function periodEndDay(periodEnd: string | undefined): string {
-  if (!periodEnd) return "\u2026";
-  return periodEnd.slice(0, 10);
-}
-
-function describeUsage(usage: UsageReport | undefined): string | undefined {
-  if (!usage) return undefined;
-  const parts = [`month: ${formatTokens(usage.totalTokens)}`];
-  if (usage.allTimeTokens !== undefined) parts.push(`total: ${formatTokens(usage.allTimeTokens)}`);
-  if (usage.requests > 0) parts.push(`${formatTokens(usage.requests)} requests`);
-  return parts.join(" \u00b7 ");
-}
-
-function describeSource(snapshot: Snapshot, estimated: boolean, capsAsOf: string): string {
-  if (estimated) {
-    const off = snapshot.quotaEndpointDisabled ? " \u00b7 quota endpoint off" : "";
-    return `source: /v1/usage + the docs caps (${capsAsOf}, estimated ~)${off}`;
-  }
-  const updated = snapshot.updatedAt ? utcClock(snapshot.updatedAt) : undefined;
-  return updated ? `source: quota (server) \u00b7 updated ${updated} UTC` : "source: quota (server)";
-}
-
-/** `2026-11-06T20:48:17Z` -> `20:48`. */
-function utcClock(iso: string): string | undefined {
-  const at = Date.parse(iso);
-  if (Number.isNaN(at)) return undefined;
-  const date = new Date(at);
-  return `${`${date.getUTCHours()}`.padStart(2, "0")}:${`${date.getUTCMinutes()}`.padStart(2, "0")}`;
 }

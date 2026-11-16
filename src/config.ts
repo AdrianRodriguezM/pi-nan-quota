@@ -4,7 +4,8 @@
  *
  * Everything is optional and validated field by field: a hand-edited file with
  * one bad value must not take the extension down, so invalid fields fall back
- * to their defaults instead of rejecting the whole document.
+ * to their defaults instead of rejecting the whole document. Unknown fields
+ * (including settings removed in 0.3.0) are silently ignored.
  */
 
 import { readFileSync } from "node:fs";
@@ -16,24 +17,12 @@ export type GlyphStyleSetting = "pill" | "safe";
 export interface NanQuotaConfig {
   /** Cache TTL for a successful read. */
   refreshSeconds: number;
-  /** Footer alerts start at this percentage. */
-  warnAt: number;
-  /** Theme `error` starts at this percentage. */
-  criticalAt: number;
-  /** How many other models the segment may alert about. */
-  maxAlerts: number;
   /** Show the segment even when the active model is not a NaN one. */
   alwaysShow: boolean;
   providerId: string;
   /** Glyph family for the bar: the pill (default) or the font-safe squares. */
   glyphs: GlyphStyleSetting;
-  /**
-   * Read the undocumented `cloud-api.nan.builders` quota endpoint. `false`
-   * keeps every request on the documented `api.nan.builders` and estimates the
-   * percentages from the published caps.
-   */
-  quotaEndpoint: boolean;
-  /** Restrict the table and footer to these models (empty = all known). */
+  /** Restrict the table to these models (empty = all known). */
   models: string[];
 }
 
@@ -42,13 +31,9 @@ export const MIN_REFRESH_SECONDS = 30;
 
 export const DEFAULT_CONFIG: NanQuotaConfig = {
   refreshSeconds: 120,
-  warnAt: 80,
-  criticalAt: 95,
-  maxAlerts: 2,
   alwaysShow: false,
   providerId: "nan",
   glyphs: "pill",
-  quotaEndpoint: true,
   models: [],
 };
 
@@ -69,23 +54,13 @@ export function parseConfig(raw: unknown): NanQuotaConfig {
   const source = raw as Record<string, unknown>;
 
   const refreshSeconds = inRange(source["refreshSeconds"], 1, 86_400);
-  // Two requests per refresh: anything faster than 30 s would eat into the
-  // 30 requests/minute NaN allows on /v1/usage for no visible benefit.
+  // One usage request per refresh (two on a period rollover, when the first
+  // response reveals a window that must be re-requested): anything faster
+  // than 30 s would eat into the 30 requests/minute NaN allows on /v1/usage
+  // for no visible benefit.
   if (refreshSeconds !== undefined) config.refreshSeconds = Math.max(MIN_REFRESH_SECONDS, refreshSeconds);
 
-  const warnAt = inRange(source["warnAt"], 1, 100);
-  if (warnAt !== undefined) config.warnAt = Math.round(warnAt);
-
-  const criticalAt = inRange(source["criticalAt"], 1, 100);
-  if (criticalAt !== undefined) config.criticalAt = Math.round(criticalAt);
-  // A critical threshold below the warning one would invert the tone logic.
-  if (config.criticalAt < config.warnAt) config.criticalAt = config.warnAt;
-
-  const maxAlerts = inRange(source["maxAlerts"], 0, 10);
-  if (maxAlerts !== undefined) config.maxAlerts = Math.floor(maxAlerts);
-
   if (typeof source["alwaysShow"] === "boolean") config.alwaysShow = source["alwaysShow"];
-  if (typeof source["quotaEndpoint"] === "boolean") config.quotaEndpoint = source["quotaEndpoint"];
 
   const providerId = source["providerId"];
   if (typeof providerId === "string" && providerId.trim() !== "") config.providerId = providerId.trim();

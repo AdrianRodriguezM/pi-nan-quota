@@ -47,8 +47,12 @@ export function paintBrand(text: string, mode: ColorMode): string {
   return `\u001b[38;5;${BRAND_ANSI256}m${text}${RESET_FG}`;
 }
 
-/** Every glyph the bars are drawn with, in either family. */
-const BAR_GLYPHS = /[\u25b0\u25b1\u25aa\u25ab]+/g;
+/**
+ * Every glyph the bars are drawn with, in either family, plus the eighth
+ * blocks of the seven-day sparkline (`▁`–`█`). Nothing else in the table uses
+ * them.
+ */
+const BAR_GLYPHS = /[\u25b0\u25b1\u25aa\u25ab\u2581-\u2588]+/g;
 
 /**
  * Paint the bars inside a block of plain text (the `/nan-quota` table) in the
@@ -72,28 +76,3 @@ export type ThemeColorName = "dim" | "muted" | "warning" | "error" | "accent" | 
 export const plainTheme: ThemeLike = {
   fg: (_color: ThemeColorName, text: string) => text,
 };
-
-export type UsageTone = "brand" | "warning" | "error";
-
-/** Brand below `warnAt`, theme warning up to `criticalAt`, theme error above. */
-export function usageTone(percent: number, warnAt: number, criticalAt: number): UsageTone {
-  if (percent >= criticalAt) return "error";
-  if (percent >= warnAt) return "warning";
-  return "brand";
-}
-
-export interface ToneOptions {
-  mode: ColorMode;
-  theme?: ThemeLike;
-  warnAt: number;
-  criticalAt: number;
-}
-
-/** Paint `text` according to the usage tone for `percent`. */
-export function paintUsage(text: string, percent: number, options: ToneOptions): string {
-  if (text === "") return text;
-  const tone = usageTone(percent, options.warnAt, options.criticalAt);
-  if (tone === "brand") return paintBrand(text, options.mode);
-  const theme = options.theme ?? plainTheme;
-  return theme.fg(tone, text);
-}

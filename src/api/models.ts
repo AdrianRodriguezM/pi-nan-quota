@@ -6,7 +6,8 @@
  * NaN filters it by the key's plan: a member key does not see `glm5.3`
  * (premium) and nobody sees retired models such as `glm5.2`, while new models
  * show up the day they are served. That makes it the right list to decide which
- * quota rows belong on screen.
+ * consumption rows belong on screen — the credit pool itself is shared by
+ * every model, so only the table is filtered.
  *
  * It also lists non-chat endpoints (embeddings, rerank, speech, images). They
  * are kept: a membership check only asks "can this key call that id".
@@ -14,7 +15,7 @@
 
 import { canonicalModelId } from "../models.ts";
 import { FetchError } from "../types.ts";
-import { assertOk, requestHeaders } from "./quota.ts";
+import { assertOk, requestHeaders } from "./http.ts";
 
 export const MODELS_URL = "https://api.nan.builders/v1/models";
 

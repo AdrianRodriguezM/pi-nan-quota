@@ -4,81 +4,114 @@
  *
  * Everything here is deliberately plain data: a `Snapshot` is a value that can
  * be rendered without touching the network, which is what keeps the TUI
- * responsive when the quota API is slow or down.
+ * responsive when the API is slow or down.
+ *
+ * The accounting model (NaN, since 2026-11-09): ONE shared pool of credits per
+ * billing period (7,000 Inference / 20,000 Premium), drawn at each model's
+ * per-token price. There are no per-model allowances; the documented
+ * `GET /v1/usage` reports the balance, so what this extension shows is the
+ * real budget. `credits: null` means the account is not billed in credits at
+ * all (e.g. the Gentle plan with per-model caps) and the extension falls back
+ * to showing tokens.
  */
 
-/** Where a snapshot's numbers came from. */
-export type QuotaSource = "quota" | "usage";
+/** Canonical NaN model id (`glm5.3-flash`), never a pi provider/model string. */
+export type ModelId = string;
 
-/** One model's quota for the current period. */
-export interface ModelQuota {
-  /** Canonical NaN model id (`glm5.3-flash`), never a pi provider/model string. */
-  model: string;
-  /** Human label from the caps table; falls back to the id. */
-  label: string;
-  /** Monthly token cap. `0` means the model has no cap. */
-  cap: number;
-  tokensUsed: number;
+/** The account's credit balance, from the documented `/v1/usage`. */
+export interface CreditBalance {
+  /** ISO timestamp; the billing period renews at `periodEnd`. */
+  periodStart: string;
+  periodEnd: string;
+  /** Subscription allowance for the period (packs excluded). */
+  allowance: number;
+  used: number;
+  /** Allowance minus used; excludes pack credits. */
   remaining: number;
-  periodStart?: string;
-  /** Server-reported reset for this model. */
-  periodEnd?: string;
-  /**
-   * Tokens left in a purchased extra-usage pool. The server reports what is
-   * left, never the pool's original size, and the pool has its own expiry.
-   */
-  extraTokens?: number;
-  /** `false` when the pool is paused (NaN pauses it without an active membership). */
-  extraUsable?: boolean;
-  /** Absolute expiry of the extra pool, independent of the billing period. */
-  extraExpiresAt?: string;
-  /** Rolling window size, in hours and tokens (the premium glm5.3 today). */
-  windowHours?: number;
-  fullWindowTokens?: number;
-  /**
-   * Consumption inside the rolling window. The captured payload only exposes
-   * the monthly counter, so this stays undefined unless the server grows a
-   * field for it; the window is then shown as capacity only.
-   */
-  windowTokensUsed?: number;
-  updatedAt?: string;
+  /** Credits bought as packs, spendable until `packExpiresAt`. */
+  packCredits: number;
+  packExpiresAt?: string;
+  /** True when the subscription is inactive: credit requests are refused. */
+  frozen: boolean;
 }
 
-/** The documented `/v1/usage` report. */
+/** What `/v1/usage` reports for one model over the window. */
+export interface ModelTotals {
+  credits: number;
+  tokens: number;
+  promptTokens: number;
+  /** Part of `promptTokens`. */
+  cachedTokens: number;
+  completionTokens: number;
+  requests: number;
+}
+
+/** One UTC day of the window, summed across models. */
+export interface DailyCredits {
+  date: string;
+  credits: number;
+}
+
+/** The pace projection (`src/pace.ts` explains the reasoning). */
+export interface Pace {
+  creditsPerDay: number;
+  /** Days the rate is computed over; may be fractional. */
+  basisDays: number;
+  /** Epoch ms when the pool runs out; undefined when the rate is zero. */
+  runsOutAt?: number;
+  runsOutBeforeReset: boolean;
+}
+
+/** The documented `/v1/usage` report over the requested window. */
 export interface UsageReport {
   startDate: string;
   endDate: string;
   totalTokens: number;
+  /** Credits drawn over the window (`totals.credits`). */
+  totalCredits: number;
   requests: number;
-  /** Canonical model id -> tokens in the window. */
-  byModel: Record<string, number>;
+  /** Canonical model id -> window totals. */
+  byModel: Record<string, ModelTotals>;
+  /** One entry per UTC day with data, sorted by date. */
+  daily: DailyCredits[];
+  /**
+   * The account balance. Covers the billing period regardless of the window.
+   * Null when the payload says null (account not billed in credits) or when
+   * the object is malformed or absent.
+   */
+  credits: CreditBalance | null;
   allTimeTokens?: number;
-  allTimeRequests?: number;
   cachedAt?: string;
 }
 
-/** A complete, renderable view of the account's quota. */
+/**
+ * A complete, renderable view of the account: the credit balance, the pace
+ * projection, and per-model consumption over the window, restricted to the
+ * models this key can call and the user listed in `config.models` (the
+ * balance itself is account-wide and never filtered).
+ */
 export interface Snapshot {
-  source: QuotaSource;
-  /** True when caps came from the dated docs table instead of the server. */
-  estimated: boolean;
-  periodStart?: string;
-  periodEnd?: string;
   /** Epoch ms of the read that produced this snapshot. */
   fetchedAt: number;
-  models: ModelQuota[];
-  usage?: UsageReport;
-  /** Newest `updatedAt` reported by the quota endpoint. */
-  updatedAt?: string;
+  /** The UTC-day window the per-model numbers cover. */
+  window: { startDate: string; endDate: string };
+  credits: CreditBalance | null;
+  pace?: Pace;
+  /** Served models with data in the window (all-zero rows are never stored). */
+  byModel: Record<ModelId, ModelTotals>;
+  /** Tokens of the models above. */
+  totalTokens: number;
+  /** Credits of the models above. */
+  totalCredits: number;
+  /** Daily credit totals over the window (account-wide, unfiltered). */
+  daily: DailyCredits[];
   /**
    * Canonical ids this API key can call, from the documented `GET /v1/models`.
-   * NaN filters that list by plan, so it is what separates "premium model you
-   * do not have" and "retired model" from "model you can use". Undefined when
-   * the list could not be read; consumers then fail open.
+   * NaN filters that list by plan. Undefined when the list could not be read;
+   * consumers then fail open.
    */
   served?: string[];
-  /** True when the user turned the undocumented quota endpoint off. */
-  quotaEndpointDisabled?: boolean;
+  allTimeTokens?: number;
 }
 
 /** Failure taxonomy that drives backoff, notifications and user advice. */

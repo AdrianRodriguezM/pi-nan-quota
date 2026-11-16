@@ -1,12 +1,13 @@
 # pi-nan-quota
 
-Your [NaN Builders](https://nan.builders) quota in the [pi](https://pi.dev) footer:
-a bar for the model you are using, in NaN's violet, and a `/nan-quota` command
-with the per-model breakdown.
+Your [NaN Builders](https://nan.builders) credits in the [pi](https://pi.dev)
+footer: how much of the shared pool is left, when it resets, and a warning when
+your recent pace will drain it before the reset. `/nan-quota` adds the
+per-model breakdown: credits, share, effective price and cache hits.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/AdrianRodriguezM/pi-nan-quota/main/docs/preview.png"
-       alt="The /nan-quota table with violet usage bars per model, and the footer segment: nan, a ten-pill bar, 20%, 24d3h"
+       alt="The /nan-quota table: credit gauge, pace projection and per-model credits; and the footer segment: nan, a ten-pill gauge, 3745 cr, a run-out warning and the reset countdown"
        width="713">
 </p>
 
@@ -28,10 +29,10 @@ second or two.
 ### Requirements
 
 - **pi ≥ 1.3.0** and **Node.js ≥ 22**.
-- **A NaN API key** from an inference plan: *NaN member* or *GLM 5.3 premium*.
-  The *Community* plan has no API access, so there is no key to read quota with.
-  Create one at [cloud.nan.builders](https://cloud.nan.builders/) → Settings → API
-  Keys.
+- **A NaN API key** from a plan with credits (*nan_member*, 7,000 credits per
+  billing period, or *Premium*, 20,000) or from a credit pack. The *Community*
+  plan includes no credits. Create the key at
+  [cloud.nan.builders](https://cloud.nan.builders/) → Settings → API Keys.
 - **The NaN provider configured in pi**, any of:
   - the `nan` block in `~/.pi/agent/models.json` from
     [NaN's pi guide](https://nan.builders/docs/pi) (or written by the NaN CLI);
@@ -43,126 +44,134 @@ falling back to `NAN_API_KEY`.
 
 ## What you see
 
+Since 2026-11-09 NaN bills **one pool of credits per billing period** for every
+model, drawn at each model's price per token (input, cached input and output).
+There is no allowance per model, so the extension tracks the pool.
+
 ### Footer
 
 Drawn only while the active model talks to NaN (or always, with `alwaysShow`):
 
 | Situation | Segment |
 |---|---|
-| Monthly cap, 20 % used, resets in 24 days | `nan ▰▰▱▱▱▱▱▱▱▱  20% 24d3h` |
-| Another model is about to run out | `nan ▰▰▰▰▰▰▰▱▱▱  71% 24d3h · glm5.3-flash 88%` |
-| Cap reached, a purchased extra pool is backing it | `nan ▰▰▰▰▰▰▰▰▰▰ 100% +125M 24d3h` |
-| A model NaN does not cap (`qwen3.6`, `gemma4`, new models) | `nan no cap · 427 this month` |
-| A model your plan does not include (`glm5.3` on a member key) | `nan glm5.3 not in your plan` |
-| A model NaN no longer serves (`glm5.2`) | `nan glm5.2 not available on this key` |
+| On pace to last until the reset | `nan ▰▰▰▰▰▰▰▱▱▱ 4980 cr · resets 15d18h` |
+| Your recent pace drains the pool before the reset | `nan ▰▰▰▰▰▱▱▱▱▱ 3745 cr · ⚠ empty in ~8d · resets 16d2h` |
+| Credit packs on top of the plan's allowance | `nan ▰▰▰▱▱▱▱▱▱▱ 2100+1000 cr · resets 9d2h` |
+| Last refresh failed; the data is 40 minutes old | `nan ▰▰▰▰▰▰▰▱▱▱ 4980 cr · resets 15d18h ·40m` |
+| The pool is spent (or a run ended on `402`) | `nan ⛔ credits spent — resets 15d18h` |
+| The subscription is inactive (e.g. failed payment) | `nan ⏸ subscription inactive — cloud.nan.builders` |
+| The account is not billed in credits | `nan 1.2B tokens (30d)` |
+| The active model is not served to this key | `nan glm5.3 not available on this key` |
 | First read still in flight, or no key | `nan ···` |
-| Last refresh failed; the bar is 40 minutes old | `nan ▰▰▱▱▱▱▱▱▱▱  20% 24d3h ·40m` |
 | The active model is not a NaN one | *(nothing)* |
 
-The bar is ten pills, `▰` for the used part and `▱` for the rest, all in NaN's
-violet `#7D39EB`, with no gap between the two parts. The scale is uniform: empty
-means nothing used, full means the cap is reached, and the nine steps in between
-share 1–99 % evenly, eleven points each:
+- **The gauge** is ten pills for what is left of the plan's allowance this
+  period: full at the start of the period, empty when it is spent. The scale is
+  uniform: empty only at 0 %, full only at 100 %, nine steps of eleven points
+  in between. Credit packs are not part of the gauge. They are shown as
+  `+1000` after the number.
+- **The number** is whole credits left, rounded down.
+- **`⚠ empty in ~7d`** appears only when your recent pace runs the pool (packs
+  included) dry before the reset. It is the time left at that pace. The pace
+  is your spend over the last seven UTC days, not the average of the whole
+  period, so it follows changes in how you work. It needs twelve hours of data
+  before it projects anything.
+- **`resets 15d18h`** counts down to the end of your billing period, which
+  starts on your Stripe anchor, not on the 1st.
+- The credit number turns to the warning colour when under 10 % of the
+  allowance is left and there are no packs.
 
-| Used | Bar | | Used | Bar |
-|---|---|---|---|---|
-| 0 % | `▱▱▱▱▱▱▱▱▱▱` | | 56–66 % | `▰▰▰▰▰▰▱▱▱▱` |
-| 1–11 % | `▰▱▱▱▱▱▱▱▱▱` | | 67–77 % | `▰▰▰▰▰▰▰▱▱▱` |
-| 12–22 % | `▰▰▱▱▱▱▱▱▱▱` | | 78–88 % | `▰▰▰▰▰▰▰▰▱▱` |
-| 23–33 % | `▰▰▰▱▱▱▱▱▱▱` | | 89–99 % | `▰▰▰▰▰▰▰▰▰▱` |
-| 34–44 % | `▰▰▰▰▱▱▱▱▱▱` | | 100 % | `▰▰▰▰▰▰▰▰▰▰` |
-| 45–55 % | `▰▰▰▰▰▱▱▱▱▱` | | | |
-
-So the bar climbs one pill at a time, never skips one, lights the first pill at
-the first unit of usage, is exactly half around 50 %, and is only full at the
-cap. It is drawn from the printed percentage, so the two always agree. The scale
-is the same for every model: it is a share of that model's own cap. The bar is
-always ten columns and the percentage four, so nothing in the footer moves as the
-numbers change.
-
-From `warnAt` (80 %) the used part and the alerts switch to your theme's warning
-colour, from `criticalAt` (95 %) to its error colour.
+The pool is shared by every model, so the segment is the same whichever NaN
+model is active.
 
 ### `/nan-quota`
 
 ```
-NaN · period 2026-11-01 → 2026-12-01 (resets in 24d 3h)
+NaN · billing period Nov 2 → Dec 2 · resets in 16d 2h
 
-  deepseek-v4-flash  ▰▰▱▱▱▱▱▱▱▱  20%   614.6M / 3.0B    2.4B free
-  glm5.3-flash       ▰▰▰▱▱▱▱▱▱▱  26%   529.3M / 2.0B    1.5B free
-  mimo-v2.6-flash    ▰▱▱▱▱▱▱▱▱▱   2%    19.1M / 1.0B  980.9M free
-  qwen3.8-flash      ▰▱▱▱▱▱▱▱▱▱   7%    34.5M / 500M  465.5M free
+  credits  ▰▰▰▰▰▱▱▱▱▱  3745.5 left of 7000 · 3254.5 used
+  packs    none
+  pace     ~494 cr/day over the last 6.6 days → runs out ~Nov 24, 8 days before the reset
+  session  +41.3 cr since this pi session started (account-wide, every key)
 
-other models this month: qwen3-embedding 14.8k · qwen3.6 427 · gemma4 135
+  model                                  credits  share  cr/Mtok  cached  tokens    req
+  deepseek-v4-flash (DeepSeek V4 Flash)   1156.8    36%     1.32     60%  873.7M  13.7k
+  glm5.3-flash (GLM 5.3 Flash)             963.1    30%     1.32     10%  730.9M   2.4k
+  glm5.3 (GLM 5.3)                         560.0    17%    15.78     89%   35.5M    667
+  deepseek-v4-pro (DeepSeek V4 Pro)        497.6    15%    12.34     85%   40.3M    597
+  qwen3.8-flash (Qwen 3.8 Flash)            72.3     2%     1.72     67%   42.1M   1.8k
+  qwen3.8-max (Qwen 3.8 Max)                 2.6     0%        —      0%   18.9k      3
+  hy4 (HY4)                                  2.0     0%        —      0%   26.3k      3
+  mimo-v2.6-flash (MiMo V2.6 Flash)          0.1     0%        —     67%   35.2k     15
+  kimi-k3.1-pro (Kimi K3.1 Pro)              0.1     0%        —      0%     253      1
+  no credits drawn: gemma4, qwen3.6
 
-month: 1.2B · total: 1.2B · 12.4k requests
+  last 7 days  █▅▇▇▄▂▇  716 414 578 566 285 130 566 cr  (Nov 10 → Nov 16, UTC)
 
-source: quota (server) · updated 20:48 UTC
+source: /v1/usage 2026-11-10 → 2026-11-16 (whole UTC days) · the balance is authoritative
 ```
 
-On a GLM 5.3 premium key, `glm5.3` gets its own row with its rolling window
-(`4h window: 400M`). A purchased extra pool adds `+125M extra until 2027-04-29`
-to its model's row, or `(paused: needs an active membership)` when NaN has
-paused it.
+- **cr/Mtok** is what a million tokens actually cost you on that model, with
+  your cache hits included. It is the number to look at when choosing between
+  models: here the larger models cost about ten times as much per token as the
+  flash ones.
+- **cached** is the share of input tokens served from the prompt cache, which
+  NaN bills cheaper.
+- **session** is the change in the balance since this pi session started. The
+  balance belongs to the account, so it also counts other sessions, subagents
+  and keys running at the same time.
+- Per-model rows are counted by whole UTC days, while the billing period starts
+  mid-day, so the period's first day can include the tail of the previous one.
+  The balance at the top is the authoritative number.
 
-The table is written to the transcript as a custom entry, which pi keeps out of
-the model's context: asking for your quota costs no tokens.
+The table is a custom entry, which pi keeps out of the model's context: asking
+for it costs no tokens.
 
 - `/nan-quota refresh` reads the API now, ignoring the cache.
 - `/nan-quota help` lists the subcommands and settings.
 
-## How it works with NaN's plans
+## Where the numbers come from
 
-The extension does not carry a list of plans, premium models or retired models.
-It asks NaN:
+The extension carries no plan list, no model list and no prices. It asks NaN's
+documented API:
 
-- **Caps, consumption, reset and extra pools** come from the quota endpoint the
-  NaN dashboard uses, so a cap NaN changes tomorrow is right tomorrow.
-- **Which models your key can call** comes from the documented
+- **The balance, the billing period and the per-model credits** come from
+  [`GET /v1/usage`](https://nan.builders/docs/api). It reports the current
+  billing period's allowance, the credits used and remaining, the pack credits
+  and their expiry, whatever window is asked for, and per day and per model it
+  reports the credits billed. NaN says the balance can lag the live one by up
+  to a minute.
+- **Which models your key can call** comes from
   [`GET /v1/models`](https://nan.builders/docs/api), which NaN filters by plan.
-  That is how a member key does not see `glm5.3`, nobody sees retired models such
-  as `glm5.2` (the quota endpoint still reports both), and a model NaN starts
-  serving today shows up today.
-- **Month and all-time totals**, and the usage of uncapped models, come from the
-  documented [`GET /v1/usage`](https://nan.builders/docs/api).
+  Retired models disappear, and a model NaN starts serving works the same day.
 
-Percentages are always against the monthly cap. A purchased extra pool is shown
-next to it, not folded into it: the API reports what is left in a pool, not how
-large it was or in which order NaN draws from it.
+When the pool and the packs are spent, NaN answers model requests with
+`402 insufficient_balance`. The extension notices it at the end of the turn and
+the footer switches to `nan ⛔ credits spent` until a later run succeeds or a
+fresh balance shows credits again. A credit pack or the next billing period
+fixes it. Retrying does not.
 
-The rolling window of the premium model is shown by size only: NaN reports how
-large the window is, not how much of it has been used, and the extension does not
-guess.
+Accounts that are not billed in credits (the usage report says so with
+`credits: null`) get the token view instead: tokens over up to the last 30 days,
+with no gauge.
 
 ## Privacy and network
 
-Requests go to two NaN hosts, with your key in the `Authorization` header and
-`pi-nan-quota/<version>` as the user agent. Nothing else is sent, and nothing is
-sent anywhere else. There is no telemetry.
+Every request goes to `api.nan.builders`, with your key in the `Authorization`
+header and `pi-nan-quota/<version>` as the user agent. Nothing else is sent,
+and nothing is sent anywhere else. There is no telemetry.
 
-| Request | Host | Documented | When |
-|---|---|---|---|
-| `GET /api/usage/quota` | `cloud-api.nan.builders` | no | each refresh |
-| `GET /v1/usage` | `api.nan.builders` | [yes](https://nan.builders/docs/api) | each refresh |
-| `GET /v1/models` | `api.nan.builders` | [yes](https://nan.builders/docs/api) | at most hourly |
+| Request | When |
+|---|---|
+| `GET /v1/usage` | each refresh (a second one only when a new billing period starts) |
+| `GET /v1/models` | at most hourly |
 
 A refresh happens when a session starts on a NaN model, when you switch to one,
 after a turn (at most once every two minutes), and on `/nan-quota`. That is well
-under the documented limit of the usage endpoint (30 requests per minute, counted
-separately from inference).
-
-The quota endpoint is not in NaN's published documentation; it is the one the
-dashboard reads, and its own error message states that `sk-` API keys are
-accepted. To keep every request on the documented API, turn it off:
-
-```json
-{ "quotaEndpoint": false }
-```
-
-Caps then come from a table copied from [NaN's model docs](https://nan.builders/docs/models),
-dated in `src/caps.ts`, and every percentage is marked `~` as an estimate. The
-same thing happens automatically, with one warning, if the quota endpoint ever
-stops answering in the expected shape.
+under the documented limit of the usage endpoint (30 requests per minute,
+counted separately from inference). A `429` is honoured through its
+`Retry-After`, and failures back off exponentially up to fifteen minutes,
+keeping the last good reading on screen.
 
 ## Configuration
 
@@ -170,13 +179,9 @@ stops answering in the expected shape.
 
 ```json
 {
-  "warnAt": 80,
-  "criticalAt": 95,
-  "maxAlerts": 2,
   "alwaysShow": false,
   "providerId": "nan",
   "glyphs": "pill",
-  "quotaEndpoint": true,
   "models": [],
   "refreshSeconds": 120
 }
@@ -184,31 +189,31 @@ stops answering in the expected shape.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `warnAt` | `80` | Percentage at which the bar turns to the warning colour and other models start appearing as alerts. |
-| `criticalAt` | `95` | Percentage at which it turns to the error colour. Never below `warnAt`. |
-| `maxAlerts` | `2` | How many other models may append `· model 91%`. `0` turns alerts off. |
-| `alwaysShow` | `false` | Draw the segment with any model; it then shows your capped model closest to its limit. |
+| `alwaysShow` | `false` | Draw the segment with any model, not only while a NaN one is active. |
 | `providerId` | `"nan"` | Provider id to treat as NaN when its models have no `nan.builders` base URL. |
 | `glyphs` | `"pill"` | `"pill"` (`▰`/`▱`) or `"safe"` (`▪`/`▫`) for fonts without the parallelograms. |
-| `quotaEndpoint` | `true` | `false` keeps every request on the documented API (see above). |
-| `models` | `[]` | Restrict the footer and the table to these model ids. |
+| `models` | `[]` | Restrict the `/nan-quota` table to these model ids. The balance is always account-wide. |
 | `refreshSeconds` | `120` | How long a successful read is reused. Minimum `30`. |
 
-An invalid value is ignored on its own, so one typo does not reset the rest. The
-file is read again on `/reload`.
+Invalid values are ignored one by one, so a typo falls back to the default
+instead of taking the extension down. The file is re-read on `/reload`.
 
 `PI_NAN_QUOTA_GLYPHS=safe` switches the glyphs for a single session.
+
+Keys from 0.1.x are ignored if present: `quotaEndpoint` (the dashboard
+endpoint it toggled no longer serves live data) and `warnAt`, `criticalAt`,
+`maxAlerts` (they thresholded per-model allowances that no longer exist).
 
 ## Terminals and fonts
 
 - Colour follows the terminal: 24-bit when `COLORTERM` says `truecolor`, the
   nearest of 256 colours otherwise, none with `NO_COLOR` or `TERM=dumb` (the
-  pills still show the progress through their shape).
+  pills still show the level through their shape).
 - `▰` and `▱` are East Asian Width *neutral*: one column wide even where
   ambiguous-width characters are drawn double.
 - Some monospace fonts do not have them (JetBrains Mono, for one). The terminal
   then borrows them from another font, which can look uneven; `"glyphs": "safe"`
-  uses small squares every monospace font tested has.
+  uses small squares that every monospace font tested has.
 
 ## What it does not do
 
@@ -218,10 +223,9 @@ file is read again on `/reload`.
   and both packages work side by side.
 - No writes: no settings, no credentials, no session entries other than the
   tables you ask for.
-- No history, charts, notifications beyond one warning per failure, or support
-  for several NaN accounts at once.
-- No Helmcode enterprise tenants (`api.helmcode.com`): only the NaN community
-  cluster.
+- No buying: credit packs and automatic recharge live in the dashboard.
+- No support for several NaN accounts at once, and no Helmcode enterprise
+  tenants (`api.helmcode.com`): only the NaN community cluster.
 
 ## Troubleshooting
 
@@ -229,10 +233,13 @@ file is read again on `/reload`.
 |---|---|
 | No segment at all | The active model is not a NaN one. Pick one with `/model`, or set `alwaysShow`. If your provider has an unusual id and no `nan.builders` base URL, set `providerId`. |
 | `nan ···` that never goes away | No key. `/login nan` (or your provider's id), or export `NAN_API_KEY`. `/nan-quota` says which provider it looked up. |
-| "the API key was rejected" | The key is mistyped, revoked, or from a plan without API access (Community). Check it in cloud.nan.builders → Settings → API Keys. |
-| `nan glm5.3 not in your plan` | `glm5.3` needs the GLM 5.3 premium plan. NaN's own pi guide lists it for everyone, so it may be in your `models.json` anyway. |
-| `~20%` and "the docs caps" in the table | The quota endpoint failed or is turned off; the numbers are estimates from `/v1/usage` and the dated caps table. |
-| `·40m` at the end | The last refresh failed; the bar is the last good reading, 40 minutes old. It retries with backoff. |
+| "the API key was rejected" | The key is mistyped or revoked, or the account has no credits plan or pack. Check it in cloud.nan.builders → Settings → API Keys. |
+| `nan glm5.3 not available on this key` | The key cannot call that model (plan or retired). `/v1/models` is the authority. |
+| `nan ⛔ credits spent` | The pool and the packs are spent (`402`). Buy a pack at cloud.nan.builders or wait for the reset. |
+| `nan ⏸ subscription inactive` | NaN refuses credit-billed requests until the subscription is active again (for example after a failed payment). |
+| `⚠ empty in ~7d` | At your pace over the last seven days, the pool runs out about seven days from now, before the reset. Moving volume to flash models (see **cr/Mtok** in `/nan-quota`) stretches it. |
+| `·40m` at the end | The last refresh failed; the data is the last good reading, 40 minutes old. It retries with backoff. |
+| The balance differs slightly from the dashboard | NaN says the API balance can lag by up to a minute. `/nan-quota refresh` reads it again. |
 | Pills look uneven or misaligned | Your font lacks `▰`/`▱`; use `"glyphs": "safe"`. |
 
 ## Development
@@ -243,13 +250,16 @@ npm run check   # tsc --noEmit, strict
 npm test        # unit, wiring and real-pi smoke suites; no network
 ```
 
-- `test/run.mjs` — the pure pieces against payloads captured verbatim from the
-  three endpoints (`test/fixtures/`): validation, plan filtering, provider
-  detection, bar geometry, footer shapes, cache policy, command text.
-- `test/wiring.mjs` — the extension driven through a stand-in `ExtensionAPI` with
-  `fetch` stubbed: events, the provider gate, request counts, failure paths, the
-  privacy switch.
-- `test/smoke.mjs` — the package loaded by a real pi through its SDK. CI runs it
+- `test/run.mjs` tests the pure pieces against a `/v1/usage` payload captured
+  verbatim (`test/fixtures/usage-credits.json`) and variants derived from it in
+  the tests: validation, pagination, window choice, pace projection, plan
+  filtering, provider detection, bar geometry, footer shapes and states, cache
+  policy and command text.
+- `test/wiring.mjs` drives the extension through a stand-in `ExtensionAPI`
+  with `fetch` stubbed: events, the provider gate, request counts, the
+  billing-period rollover, the `402` state, the session delta and failure
+  paths.
+- `test/smoke.mjs` loads the package in a real pi through its SDK. CI runs it
   against pi 1.3.0 and the latest pi.
 
 ## License

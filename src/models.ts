@@ -2,11 +2,10 @@
 /**
  * Model ids and NaN detection.
  *
- * The quota endpoint is the source of truth for caps, but it also reports rows
- * the key cannot use: retired models (`glm5.2`) and models of a plan the member
- * does not hold (`glm5.3`, premium). The documented `GET /v1/models` is
- * filtered by plan on NaN's side, so intersecting both gives exactly "what this
- * key can call, and how much of it is left" — without a hard-coded list of
+ * The usage report can name models the key can no longer call: retired ids
+ * and models of a plan the member does not hold. The documented
+ * `GET /v1/models` is filtered by plan on NaN's side, so intersecting both
+ * gives exactly "what this key can call" — without a hard-coded list of
  * retired or premium models that would go stale.
  */
 
@@ -40,17 +39,15 @@ export function sameModel(a: string, b: string): boolean {
 }
 
 /**
- * Keep the entries whose model the key can call.
- *
- * Fails open twice: with no served list (the request failed) everything is
- * kept, and if the intersection is empty while the input was not, the two
- * naming schemes disagree — keeping the payload beats blanking the footer.
+ * Keep the ids the key can call. Fails open twice: with no served list
+ * everything is kept, and if the intersection is empty while the input was
+ * not, the two naming schemes disagree — keeping the data beats blanking it.
  */
-export function filterServed<T extends { model: string }>(entries: readonly T[], served: readonly string[] | undefined): T[] {
-  if (!served || served.length === 0) return [...entries];
-  const allowed = new Set(served.map(canonicalModelId));
-  const kept = entries.filter((entry) => allowed.has(canonicalModelId(entry.model)));
-  return kept.length > 0 || entries.length === 0 ? kept : [...entries];
+export function filterServedIds(models: readonly string[], served: readonly string[] | undefined): string[] {
+  if (!served || served.length === 0) return [...models];
+  const allowed = new Set(served.map((id) => canonicalModelId(id)));
+  const kept = models.filter((model) => allowed.has(canonicalModelId(model)));
+  return kept.length > 0 || models.length === 0 ? kept : [...models];
 }
 
 /** True when the served list is known and does not contain `model`. */
